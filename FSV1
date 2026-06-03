@@ -25,6 +25,16 @@ local MIN_PLAYER  = 5     -- min player per server saat hop
 local SNIPE_ONLY  = true  -- hanya kirim listing yang harga < RAP
 local MIN_RAP     = 1     -- abaikan item dengan RAP 0 / tidak diketahui
 
+-- Filter harga manual per item (nama item = harga maksimal yang mau ditampilkan)
+-- Item di sini TIDAK perlu punya RAP — langsung pakai batas harga manual
+-- Item yang tidak ada di sini tetap pakai aturan price < RAP seperti biasa
+local CUSTOM_FILTERS = {
+    ["Megalodon"]      = 500,    -- tampilkan Megalodon jika harga <= 500
+    -- ["Undead Guitar"] = 5000, -- contoh: Undead Guitar di bawah 5000
+    -- ["Holy Rod"]      = 200,  -- contoh: Holy Rod di bawah 200
+}
+
+
 -- ────────────────────────────────
 --  HTTP
 -- ────────────────────────────────
@@ -230,27 +240,53 @@ end
 --  KIRIM KE DISCORD
 -- ────────────────────────────────
 local function sendToDiscord(entries)
-    -- ── Filter: hanya listing dengan harga di bawah RAP ──
+    -- ── Filter: CUSTOM_FILTERS (manual) ATAU price < RAP ──
     local filtered = {}
     for _, e in ipairs(entries) do
-        if e.rap and e.rap >= MIN_RAP and e.price < e.rap then
-            table.insert(filtered, e)
+        -- Cek custom filter dulu (case-insensitive)
+        local customMax = nil
+        for itemName, maxPrice in pairs(CUSTOM_FILTERS) do
+            if e.name:lower() == itemName:lower() then
+                customMax = maxPrice
+                break
+            end
+        end
+
+        if customMax then
+            -- Item ada di custom filter: tampilkan jika harga <= batas manual
+            if e.price <= customMax then
+                e._filterTag = ("manual ≤%s"):format(commas(customMax))
+                table.insert(filtered, e)
+            end
+        else
+            -- Item biasa: tampilkan jika harga < RAP
+            if e.rap and e.rap >= MIN_RAP and e.price < e.rap then
+                e._filterTag = nil
+                table.insert(filtered, e)
+            end
         end
     end
 
-    print(("[Discord] %d listing total → %d di bawah RAP (snipe)"):format(#entries, #filtered))
+    print(("[Discord] %d listing total → %d lolos filter"):format(#entries, #filtered))
 
     if #filtered == 0 then
-        print("[Discord] Tidak ada listing di bawah RAP di server ini.")
+        print("[Discord] Tidak ada listing yang cocok filter di server ini.")
         return
     end
 
-    -- Sort: profit terbesar dulu (RAP - harga)
+    -- Sort: custom-filter item di atas, lalu sort profit terbesar
     table.sort(filtered, function(a, b)
-        return (a.rap - a.price) > (b.rap - b.price)
+        local aCustom = a._filterTag ~= nil
+        local bCustom = b._filterTag ~= nil
+        if aCustom ~= bCustom then return aCustom end
+        -- Profit: jika ada RAP gunakan, jika tidak pakai harga terkecil
+        local aProfit = (a.rap and a.rap > 0) and (a.rap - a.price) or -a.price
+        local bProfit = (b.rap and b.rap > 0) and (b.rap - b.price) or -b.price
+        return aProfit > bProfit
     end)
 
     entries = filtered
+
     if #entries == 0 then
         print("[Discord] Tidak ada listing untuk dikirim.")
         return
