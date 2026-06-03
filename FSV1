@@ -34,25 +34,6 @@ local CUSTOM_FILTERS = {
     -- ["Holy Rod"]      = 200,  -- contoh: Holy Rod di bawah 200
 }
 
--- Filter kategori: set ke true untuk aktifkan filter
--- Jika SEMUA false → tampilkan semua kategori
--- Jika SALAH SATU true → hanya tampilkan kategori yang true
-local CATEGORY_FILTER = {
-    Fish       = false,  -- ikan biasa
-    Rod        = false,  -- pancing / rod
-    Skin       = true,  -- skin / cosmetic
-    Accessory  = false,  -- aksesoris
-}
-
--- Ikon per kategori (tampil di Discord)
-local CATEGORY_ICONS = {
-    Fish       = "🐟",
-    Rod        = "🎣",
-    Skin       = "✨",
-    Accessory  = "💍",
-    Unknown    = "📦",
-}
-
 
 
 -- ────────────────────────────────
@@ -286,13 +267,11 @@ local function sendToDiscord(entries)
         end
 
         if customMax then
-            -- Item ada di custom filter: tampilkan jika harga <= batas manual
             if e.price <= customMax then
-                e._filterTag = ("manual ≤%s"):format(commas(customMax))
+                e._filterTag = ("≤%s"):format(commas(customMax))
                 table.insert(filtered, e)
             end
         else
-            -- Item biasa: tampilkan jika harga < RAP
             if e.rap and e.rap >= MIN_RAP and e.price < e.rap then
                 e._filterTag = nil
                 table.insert(filtered, e)
@@ -342,35 +321,30 @@ local function sendToDiscord(entries)
     local serverStr = jobId:sub(1, 8)
 
     local function buildField(i, e)
-        local cat     = e.itemType or "Unknown"
-        local catIcon = CATEGORY_ICONS[cat] or CATEGORY_ICONS.Unknown
         local sourceStr = e.source ~= "Booth" and (" [" .. e.source .. "]") or ""
         local weightStr = (e.weight and e.weight ~= "" and e.weight ~= "0")
             and (" | " .. e.weight .. "kg") or ""
 
-        -- Baris RAP/profit (ada RAP) atau manual filter
         local rapLine
         if e._filterTag then
-            -- Custom filter: tampilkan harga saja + tag
-            rapLine = ("📌 Filter: %s | Kategori: **%s**"):format(e._filterTag, cat)
+            rapLine = ("📌 Filter manual: harga ≤ %s T"):format(e._filterTag)
         elseif e.rap and e.rap > 0 then
             local profit = e.rap - e.price
             local pct    = math.floor((e.price / e.rap) * 100)
             rapLine = ("📊 RAP: **%s T** | Profit: **+%s T** (%d%%)"):format(
                 commas(e.rap), commas(profit), pct)
         else
-            rapLine = ("📂 Kategori: **%s**"):format(cat)
+            rapLine = "📊 RAP: -"
         end
 
         return {
-            name  = ("%s #%d %s%s"):format(catIcon, i, e.name, sourceStr),
+            name  = ("🔥 #%d %s%s"):format(i, e.name, sourceStr),
             value = (
                 "💰 Harga: **%s T**\n" ..
                 "%s\n" ..
                 "👤 %s | 🏷️ %s%s"
             ):format(
-                commas(e.price),
-                rapLine,
+                commas(e.price), rapLine,
                 e.seller, e.tierName, weightStr
             ),
             inline = true,
