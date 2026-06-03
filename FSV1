@@ -34,6 +34,26 @@ local CUSTOM_FILTERS = {
     -- ["Holy Rod"]      = 200,  -- contoh: Holy Rod di bawah 200
 }
 
+-- Filter kategori: set ke true untuk aktifkan filter
+-- Jika SEMUA false → tampilkan semua kategori
+-- Jika SALAH SATU true → hanya tampilkan kategori yang true
+local CATEGORY_FILTER = {
+    Fish       = false,  -- ikan biasa
+    Rod        = false,  -- pancing / rod
+    Skin       = false,  -- skin / cosmetic
+    Accessory  = false,  -- aksesoris
+}
+
+-- Ikon per kategori (tampil di Discord)
+local CATEGORY_ICONS = {
+    Fish       = "🐟",
+    Rod        = "🎣",
+    Skin       = "✨",
+    Accessory  = "💍",
+    Unknown    = "📦",
+}
+
+
 
 -- ────────────────────────────────
 --  HTTP
@@ -240,9 +260,22 @@ end
 --  KIRIM KE DISCORD
 -- ────────────────────────────────
 local function sendToDiscord(entries)
-    -- ── Filter: CUSTOM_FILTERS (manual) ATAU price < RAP ──
+    -- ── Filter: Kategori + CUSTOM_FILTERS (manual) ATAU price < RAP ──
     local filtered = {}
+
+    -- Cek apakah ada filter kategori aktif
+    local anyCategoryActive = false
+    for _, v in pairs(CATEGORY_FILTER) do
+        if v then anyCategoryActive = true; break end
+    end
+
     for _, e in ipairs(entries) do
+        -- Filter kategori (jika ada yang aktif)
+        if anyCategoryActive then
+            local cat = e.itemType or "Unknown"
+            if not CATEGORY_FILTER[cat] then continue end
+        end
+
         -- Cek custom filter dulu (case-insensitive)
         local customMax = nil
         for itemName, maxPrice in pairs(CUSTOM_FILTERS) do
@@ -309,21 +342,35 @@ local function sendToDiscord(entries)
     local serverStr = jobId:sub(1, 8)
 
     local function buildField(i, e)
-        local profit  = e.rap - e.price
-        local pct     = math.floor((e.price / e.rap) * 100)
+        local cat     = e.itemType or "Unknown"
+        local catIcon = CATEGORY_ICONS[cat] or CATEGORY_ICONS.Unknown
+        local sourceStr = e.source ~= "Booth" and (" [" .. e.source .. "]") or ""
         local weightStr = (e.weight and e.weight ~= "" and e.weight ~= "0")
             and (" | " .. e.weight .. "kg") or ""
-        local sourceStr = e.source ~= "Booth" and (" [" .. e.source .. "]") or ""
+
+        -- Baris RAP/profit (ada RAP) atau manual filter
+        local rapLine
+        if e._filterTag then
+            -- Custom filter: tampilkan harga saja + tag
+            rapLine = ("📌 Filter: %s | Kategori: **%s**"):format(e._filterTag, cat)
+        elseif e.rap and e.rap > 0 then
+            local profit = e.rap - e.price
+            local pct    = math.floor((e.price / e.rap) * 100)
+            rapLine = ("📊 RAP: **%s T** | Profit: **+%s T** (%d%%)"):format(
+                commas(e.rap), commas(profit), pct)
+        else
+            rapLine = ("📂 Kategori: **%s**"):format(cat)
+        end
 
         return {
-            name  = ("🔥 #%d %s%s"):format(i, e.name, sourceStr),
+            name  = ("%s #%d %s%s"):format(catIcon, i, e.name, sourceStr),
             value = (
-                "💰 Harga: **%s T** (%d%% RAP)\n" ..
-                "📊 RAP: **%s T** | Profit: **+%s T**\n" ..
+                "💰 Harga: **%s T**\n" ..
+                "%s\n" ..
                 "👤 %s | 🏷️ %s%s"
             ):format(
-                commas(e.price), pct,
-                commas(e.rap), commas(profit),
+                commas(e.price),
+                rapLine,
                 e.seller, e.tierName, weightStr
             ),
             inline = true,
