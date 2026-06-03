@@ -241,21 +241,9 @@ end
 --  KIRIM KE DISCORD
 -- ────────────────────────────────
 local function sendToDiscord(entries)
-    -- ── Filter: Kategori + CUSTOM_FILTERS (manual) ATAU price < RAP ──
     local filtered = {}
 
-    -- Cek apakah ada filter kategori aktif
-    local anyCategoryActive = false
-    for _, v in pairs(CATEGORY_FILTER) do
-        if v then anyCategoryActive = true; break end
-    end
-
     for _, e in ipairs(entries) do
-        -- Filter kategori (jika ada yang aktif)
-        if anyCategoryActive then
-            local cat = e.itemType or "Unknown"
-            if not CATEGORY_FILTER[cat] then continue end
-        end
 
         -- Cek custom filter dulu (case-insensitive)
         local customMax = nil
