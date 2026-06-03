@@ -1,1832 +1,401 @@
 -- ================================================================
--- Plaza Booth Sniper UI v2.0 - Full Featured
--- Features:
---   - Drag window anywhere
---   - Minimize to floating bubble
---   - RAP display per item + % comparison
---   - ALP (Average Listing Price) display
---   - Snipe detection (price <= RAP)
---   - Search / filter items
---   - Sort options (Price / RAP / Snipe)
---   - Auto-refresh timer
---   - Status bar with stats
---   - Smooth animations
---   - Robust error handling
+--  Fish It! Plaza Booth Sniper v8.0
+--  Sumber data: Replion "SaleListings" + "RAP" (bukan scan GUI)
+--  Mencakup SEMUA seller: booth fisik + player tanpa booth
+--  Auto server hop + Discord webhook
 -- ================================================================
 
 local Players            = game:GetService("Players")
-local ReplicatedStorage  = game:GetService("ReplicatedStorage")
-local CoreGui            = game:GetService("CoreGui")
-local UserInputService   = game:GetService("UserInputService")
-local TweenService       = game:GetService("TweenService")
-local HttpService        = game:GetService("HttpService")
-local RunService         = game:GetService("RunService")
 local TeleportService    = game:GetService("TeleportService")
+local HttpService        = game:GetService("HttpService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
 
--- WAIT FOR GAME TO LOAD (penting untuk autoexec / Seliware / teleport)
-if not game:IsLoaded() then
-    warn("[SniperUI] Menunggu game selesai loading...")
-    game.Loaded:Wait()
-end
-local LocalPlayer = Players.LocalPlayer
-if not LocalPlayer then
-    warn("[SniperUI] Menunggu LocalPlayer (teleport)...")
-    LocalPlayer = Players:GetPropertyChangedSignal("LocalPlayer"):Wait() and Players.LocalPlayer
-    if not LocalPlayer then LocalPlayer = Players.PlayerAdded:Wait() end
-end
-if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
-task.wait(2)
+local lp      = Players.LocalPlayer
+local placeId = game.PlaceId
+local jobId   = game.JobId
 
--- Safe require (pcall untuk antisipasi module tidak ada)
-local TradeData, Replion, ItemUtility
-local requireOK = true
-do
-    local ok1, td = pcall(function() return require(ReplicatedStorage.Shared.Trading.TradeData) end)
-    local ok2, rp = pcall(function() return require(ReplicatedStorage.Packages.Replion) end)
-    local ok3, iu = pcall(function() return require(ReplicatedStorage.Shared.ItemUtility) end)
-    if ok1 then TradeData = td end
-    if ok2 then Replion = rp end
-    if ok3 then ItemUtility = iu end
-    if not (ok1 and ok2 and ok3) then
-        requireOK = false
-        warn("[SniperUI] Beberapa module gagal di-require. Pastikan script dijalankan di Plaza.")
-    end
-end
+-- ────────────────────────────────
+--  KONFIGURASI
+-- ────────────────────────────────
+local WEBHOOK    = "https://discord.com/api/webhooks/1511803435706617907/ISbwuFnRw68XU2qvSgZ3IVCmxCn01jD3hROs_jPDiraWruyBsVzVsIcJF7m7Vy070a6e"
+local SCAN_WAIT  = 8     -- detik tunggu sebelum scan
+local HOP        = true  -- aktifkan auto server hop
+local HOP_DELAY  = 3
+local MIN_PLAYER = 5     -- min player per server saat hop
 
--- ==========================
--- CONFIG
--- ==========================
-local SUPABASE_URL = "http://152.42.234.192"
-local SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoicGxhemFfYXBpIiwiZXhwIjo5OTk5OTk5OTk5fQ.8SwQsK5VSm5HGopGN48ZufPK5Jbx-FrzjIlSUA4QwV8"
-local AUTO_REFRESH_INTERVAL = 30 -- detik
-local SNIPE_THRESHOLD_PCT  = 100 -- harga <= 100% RAP = SNIPE
-local MIN_RAP_FOR_SNIPE    = 35
-local ALP_CACHE_TTL        = 600
-
--- ==========================
--- EXECUTOR HTTP DETECTION
--- ==========================
-local executor_request = (syn and syn.request)
+-- ────────────────────────────────
+--  HTTP
+-- ────────────────────────────────
+local httpReq = (syn and syn.request)
     or (http and http.request)
-    or http_request
     or (fluxus and fluxus.request)
+    or http_request
     or request
 
--- ==========================
--- COLORS & THEME
--- ==========================
-local COLORS = {
-    bg           = Color3.fromRGB(18, 18, 24),
-    bgSecondary  = Color3.fromRGB(26, 26, 34),
-    topBar       = Color3.fromRGB(12, 12, 18),
-    accent       = Color3.fromRGB(88, 130, 255),
-    accentHover  = Color3.fromRGB(110, 150, 255),
-    gold         = Color3.fromRGB(255, 215, 80),
-    green        = Color3.fromRGB(40, 200, 100),
-    greenHover   = Color3.fromRGB(60, 220, 120),
-    red          = Color3.fromRGB(220, 60, 60),
-    redHover     = Color3.fromRGB(240, 80, 80),
-    orange       = Color3.fromRGB(255, 140, 40),
-    text         = Color3.fromRGB(230, 230, 240),
-    textDim      = Color3.fromRGB(140, 140, 160),
-    textMuted    = Color3.fromRGB(90, 90, 110),
-    cardBg       = Color3.fromRGB(32, 32, 42),
-    cardBgHover  = Color3.fromRGB(40, 40, 52),
-    snipeBg      = Color3.fromRGB(50, 30, 15),
-    snipeBorder  = Color3.fromRGB(255, 100, 30),
-    bubbleBg     = Color3.fromRGB(88, 130, 255),
-    searchBg     = Color3.fromRGB(35, 35, 48),
-    divider      = Color3.fromRGB(50, 50, 65),
-}
+if not httpReq then warn("[Sniper] HTTP tidak tersedia!"); return end
 
--- ==========================
--- HELPERS
--- ==========================
-local function FormatNumber(n)
-    if type(n) ~= "number" then return tostring(n or "?") end
-    local neg = n < 0
-    local formatted = tostring(math.floor(math.abs(n)))
-    formatted = formatted:reverse():gsub("(%d%d%d)", "%1,"):reverse()
-    if formatted:sub(1, 1) == "," then formatted = formatted:sub(2) end
-    return neg and ("-" .. formatted) or formatted
-end
-
-local function FormatCompact(n)
-    if type(n) ~= "number" then return "?" end
-    if n >= 1000000 then return string.format("%.1fM", n / 1000000) end
-    if n >= 1000 then return string.format("%.1fK", n / 1000) end
-    return tostring(math.floor(n))
-end
-
-local function IsSnipe(price, rap)
-    return rap and rap >= MIN_RAP_FOR_SNIPE
-        and price and price > 0
-        and (price / rap * 100) <= SNIPE_THRESHOLD_PCT
-end
-
-local function Tween(obj, props, duration, style, dir)
-    local info = TweenInfo.new(duration or 0.25, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out)
-    local tw = TweenService:Create(obj, info, props)
-    tw:Play()
-    return tw
-end
-
--- ==========================
--- CLEANUP OLD GUI
--- ==========================
-local guiName = "PlazaSniperV2GUI"
-if CoreGui:FindFirstChild(guiName) then
-    CoreGui[guiName]:Destroy()
-end
--- Also destroy old v1
-if CoreGui:FindFirstChild("PlazaSniperVirtualBuyGUI") then
-    CoreGui["PlazaSniperVirtualBuyGUI"]:Destroy()
-end
-
-local successCoreGui = pcall(function() local _ = CoreGui.Name end)
-local TargetGuiParent = successCoreGui and CoreGui or LocalPlayer:WaitForChild("PlayerGui")
-
--- ==========================
--- RAP CACHE
--- ==========================
-local rapCache = {}
-local alpCache = {}
-
-local function FetchRAPFromServer(itemType, itemId)
-    local cacheKey = itemType .. "/" .. tostring(itemId)
-    if rapCache[cacheKey] ~= nil then
-        local cached = rapCache[cacheKey]
-        return cached ~= false and cached or nil
-    end
-
-    if not TradeData or not TradeData.Remotes or not TradeData.Remotes.GetItemRAP then
-        rapCache[cacheKey] = false
-        return nil
-    end
-
-    local ok, rapValue, _ = pcall(function()
-        return TradeData.Remotes.GetItemRAP:InvokeServer(itemType, itemId)
-    end)
-
-    if not ok then
-        rapCache[cacheKey] = false
-        return nil
-    end
-
-    rapValue = tonumber(rapValue)
-    if not rapValue or rapValue == -1 then
-        rapCache[cacheKey] = false
-        return nil
-    end
-
-    rapCache[cacheKey] = rapValue
-    return rapValue
-end
-
-local function GetAvgPrice(itemType, itemId)
-    if not executor_request then return nil end
-    if SUPABASE_URL == "" or SUPABASE_KEY == "" then return nil end
-
-    local cacheKey = itemType .. "/" .. tostring(itemId)
-    local cached = alpCache[cacheKey]
-    if cached and (tick() - cached._time) < ALP_CACHE_TTL then
-        return cached
-    end
-
-    local ok, result = pcall(function()
-        return executor_request({
-            Url    = SUPABASE_URL .. "/rpc/get_avg_price",
-            Method = "POST",
-            Headers = {
-                ["apikey"]        = SUPABASE_KEY,
-                ["Authorization"] = "Bearer " .. SUPABASE_KEY,
-                ["Content-Type"]  = "application/json",
-            },
-            Body = HttpService:JSONEncode({
-                p_item_type = itemType,
-                p_item_id   = tostring(itemId)
-            })
-        })
-    end)
-
-    if ok and result and result.StatusCode == 200 then
-        local decOk, data = pcall(function() return HttpService:JSONDecode(result.Body) end)
-        if decOk and data and data[1] then
-            local entry = {
-                avg    = tonumber(data[1].avg_price) or 0,
-                median = tonumber(data[1].median_price) or 0,
-                count  = tonumber(data[1].total_listings) or 0,
-                min    = tonumber(data[1].min_price) or 0,
-                max    = tonumber(data[1].max_price) or 0,
-                _time  = tick()
-            }
-            alpCache[cacheKey] = entry
-            return entry
-        end
-    end
-    return nil
-end
-
--- ==========================
--- CREATE GUI
--- ==========================
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = guiName
-ScreenGui.Parent = TargetGuiParent
-ScreenGui.ResetOnSpawn = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.DisplayOrder = 999
-
--- --- FLOATING BUBBLE (minimized state) ---
-local Bubble = Instance.new("TextButton")
-Bubble.Name = "MiniBubble"
-Bubble.Size = UDim2.new(0, 50, 0, 50)
-Bubble.Position = UDim2.new(0.5, -25, 0, 10)
-Bubble.BackgroundColor3 = COLORS.bubbleBg
-Bubble.Text = "S"
-Bubble.TextSize = 22
-Bubble.Font = Enum.Font.GothamBold
-Bubble.TextColor3 = Color3.new(1, 1, 1)
-Bubble.AutoButtonColor = false
-Bubble.Visible = false
-Bubble.Parent = ScreenGui
-Bubble.ZIndex = 100
-
-local BubbleCorner = Instance.new("UICorner")
-BubbleCorner.CornerRadius = UDim.new(1, 0) -- circle
-BubbleCorner.Parent = Bubble
-
-local BubbleStroke = Instance.new("UIStroke")
-BubbleStroke.Thickness = 2
-BubbleStroke.Color = COLORS.accentHover
-BubbleStroke.Transparency = 0.3
-BubbleStroke.Parent = Bubble
-
--- Bubble pulse animation
-local bubblePulseActive = false
-local function StartBubblePulse()
-    if bubblePulseActive then return end
-    bubblePulseActive = true
-    task.spawn(function()
-        while bubblePulseActive and Bubble and Bubble.Parent do
-            Tween(BubbleStroke, {Transparency = 0}, 0.6)
-            task.wait(0.6)
-            Tween(BubbleStroke, {Transparency = 0.6}, 0.6)
-            task.wait(0.6)
-        end
-    end)
-end
-
-local function StopBubblePulse()
-    bubblePulseActive = false
-end
-
--- Bubble notification badge
-local BubbleBadge = Instance.new("TextLabel")
-BubbleBadge.Name = "Badge"
-BubbleBadge.Size = UDim2.new(0, 20, 0, 20)
-BubbleBadge.Position = UDim2.new(1, -8, 0, -8)
-BubbleBadge.BackgroundColor3 = COLORS.red
-BubbleBadge.Text = "0"
-BubbleBadge.TextSize = 10
-BubbleBadge.Font = Enum.Font.GothamBold
-BubbleBadge.TextColor3 = Color3.new(1, 1, 1)
-BubbleBadge.Visible = false
-BubbleBadge.ZIndex = 101
-BubbleBadge.Parent = Bubble
-local BadgeCorner = Instance.new("UICorner")
-BadgeCorner.CornerRadius = UDim.new(1, 0)
-BadgeCorner.Parent = BubbleBadge
-
--- Bubble drag
-do
-    local dragging, dragStart, startPos
-    Bubble.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = Bubble.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - dragStart
-            Bubble.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        end
-    end)
-end
-
--- --- MAIN FRAME ---
-local MainFrame = Instance.new("Frame")
-MainFrame.Name = "MainFrame"
-MainFrame.Size = UDim2.new(0, 580, 0, 520)
-MainFrame.Position = UDim2.new(0.5, -290, 0.5, -260)
-MainFrame.BackgroundColor3 = COLORS.bg
-MainFrame.BorderSizePixel = 0
-MainFrame.ClipsDescendants = true
-MainFrame.Parent = ScreenGui
-
-local MainCorner = Instance.new("UICorner")
-MainCorner.CornerRadius = UDim.new(0, 12)
-MainCorner.Parent = MainFrame
-
-local MainStroke = Instance.new("UIStroke")
-MainStroke.Thickness = 1.5
-MainStroke.Color = COLORS.divider
-MainStroke.Transparency = 0.5
-MainStroke.Parent = MainFrame
-
--- Drop shadow removed for performance
-
--- --- TOP BAR ---
-local TopBar = Instance.new("Frame")
-TopBar.Name = "TopBar"
-TopBar.Size = UDim2.new(1, 0, 0, 44)
-TopBar.BackgroundColor3 = COLORS.topBar
-TopBar.BorderSizePixel = 0
-TopBar.Parent = MainFrame
-
-local TopCorner = Instance.new("UICorner")
-TopCorner.CornerRadius = UDim.new(0, 12)
-TopCorner.Parent = TopBar
-
--- Fix bottom corners of TopBar to be square
-local TopBarFix = Instance.new("Frame")
-TopBarFix.Name = "BottomFix"
-TopBarFix.Size = UDim2.new(1, 0, 0, 14)
-TopBarFix.Position = UDim2.new(0, 0, 1, -14)
-TopBarFix.BackgroundColor3 = COLORS.topBar
-TopBarFix.BorderSizePixel = 0
-TopBarFix.Parent = TopBar
-
--- Accent line under topbar
-local AccentLine = Instance.new("Frame")
-AccentLine.Name = "AccentLine"
-AccentLine.Size = UDim2.new(1, 0, 0, 2)
-AccentLine.Position = UDim2.new(0, 0, 1, 0)
-AccentLine.BackgroundColor3 = COLORS.accent
-AccentLine.BorderSizePixel = 0
-AccentLine.Parent = TopBar
-
--- Gradient on accent line
-local AccGrad = Instance.new("UIGradient")
-AccGrad.Color = ColorSequence.new({
-    ColorSequenceKeypoint.new(0, COLORS.accent),
-    ColorSequenceKeypoint.new(0.5, COLORS.gold),
-    ColorSequenceKeypoint.new(1, COLORS.accent),
-})
-AccGrad.Parent = AccentLine
-
--- Title
-local Title = Instance.new("TextLabel")
-Title.Name = "Title"
-Title.Size = UDim2.new(0, 300, 1, 0)
-Title.Position = UDim2.new(0, 14, 0, 0)
-Title.BackgroundTransparency = 1
-Title.Text = "Plaza Sniper Pro"
-Title.TextColor3 = COLORS.gold
-Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.Font = Enum.Font.GothamBold
-Title.TextSize = 16
-Title.Parent = TopBar
-
--- Version tag
-local VersionTag = Instance.new("TextLabel")
-VersionTag.Name = "Version"
-VersionTag.Size = UDim2.new(0, 40, 0, 16)
-VersionTag.Position = UDim2.new(0, 190, 0.5, -8)
-VersionTag.BackgroundColor3 = COLORS.accent
-VersionTag.BackgroundTransparency = 0.7
-VersionTag.Text = "v2.0"
-VersionTag.TextColor3 = COLORS.accentHover
-VersionTag.Font = Enum.Font.GothamBold
-VersionTag.TextSize = 10
-VersionTag.Parent = TopBar
-local VCorner = Instance.new("UICorner")
-VCorner.CornerRadius = UDim.new(0, 4)
-VCorner.Parent = VersionTag
-
--- --- TOP BAR BUTTONS ---
-local function CreateTopBtn(name, text, color, size, posX)
-    local btn = Instance.new("TextButton")
-    btn.Name = name
-    btn.Size = UDim2.new(0, size, 0, 28)
-    btn.Position = UDim2.new(1, posX, 0.5, -14)
-    btn.BackgroundColor3 = color
-    btn.Text = text
-    btn.Font = Enum.Font.GothamSemibold
-    btn.TextSize = 12
-    btn.TextColor3 = Color3.new(1, 1, 1)
-    btn.AutoButtonColor = false
-    btn.BorderSizePixel = 0
-    btn.Parent = TopBar
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 6)
-    corner.Parent = btn
-    -- Hover effect
-    btn.MouseEnter:Connect(function()
-        Tween(btn, {BackgroundColor3 = Color3.new(
-            math.min(color.R + 0.08, 1),
-            math.min(color.G + 0.08, 1),
-            math.min(color.B + 0.08, 1)
-        )}, 0.15)
-    end)
-    btn.MouseLeave:Connect(function()
-        Tween(btn, {BackgroundColor3 = color}, 0.15)
-    end)
-    return btn
-end
-
-local CloseBtn    = CreateTopBtn("CloseBtn", "X", COLORS.red, 30, -38)
-local MinimizeBtn = CreateTopBtn("MinBtn", "-", COLORS.textMuted, 30, -72)
-local RefreshBtn  = CreateTopBtn("RefreshBtn", "Refresh", COLORS.accent, 80, -158)
-local ReHopBtn    = CreateTopBtn("ReHopBtn", "Hop", Color3.fromRGB(160, 80, 220), 64, -228)
-local CustomTPBtn = CreateTopBtn("CustomTPBtn", "TP", Color3.fromRGB(50, 160, 140), 54, -288)
-
--- Forward-declare StatusText (created in Status Bar section below)
-local StatusText
-
--- ==========================
--- REHOP SERVER HOP SYSTEM
--- ==========================
-local rehopPanelOpen = false
-local isHopping = false
-
--- ReHop dropdown panel
-local ReHopPanel = Instance.new("Frame")
-ReHopPanel.Name = "ReHopPanel"
-ReHopPanel.Size = UDim2.new(0, 220, 0, 0)
-ReHopPanel.Position = UDim2.new(1, -228, 0, 44)
-ReHopPanel.BackgroundColor3 = COLORS.bgSecondary
-ReHopPanel.BorderSizePixel = 0
-ReHopPanel.ClipsDescendants = true
-ReHopPanel.Visible = false
-ReHopPanel.ZIndex = 50
-ReHopPanel.Parent = MainFrame
-
-local RHPCorner = Instance.new("UICorner")
-RHPCorner.CornerRadius = UDim.new(0, 10)
-RHPCorner.Parent = ReHopPanel
-
-local RHPStroke = Instance.new("UIStroke")
-RHPStroke.Thickness = 1
-RHPStroke.Color = Color3.fromRGB(160, 80, 220)
-RHPStroke.Transparency = 0.5
-RHPStroke.Parent = ReHopPanel
-
--- Panel header
-local RHPHeader = Instance.new("TextLabel")
-RHPHeader.Name = "Header"
-RHPHeader.Size = UDim2.new(1, 0, 0, 30)
-RHPHeader.Position = UDim2.new(0, 0, 0, 0)
-RHPHeader.BackgroundTransparency = 1
-RHPHeader.Text = "Server Hop"
-RHPHeader.TextColor3 = Color3.fromRGB(200, 140, 255)
-RHPHeader.Font = Enum.Font.GothamBold
-RHPHeader.TextSize = 13
-RHPHeader.ZIndex = 51
-RHPHeader.Parent = ReHopPanel
-
--- Divider line
-local RHPDivider = Instance.new("Frame")
-RHPDivider.Size = UDim2.new(1, -20, 0, 1)
-RHPDivider.Position = UDim2.new(0, 10, 0, 30)
-RHPDivider.BackgroundColor3 = COLORS.divider
-RHPDivider.BorderSizePixel = 0
-RHPDivider.ZIndex = 51
-RHPDivider.Parent = ReHopPanel
-
--- Server info label
-local RHPInfo = Instance.new("TextLabel")
-RHPInfo.Name = "Info"
-RHPInfo.Size = UDim2.new(1, -16, 0, 16)
-RHPInfo.Position = UDim2.new(0, 8, 0, 34)
-RHPInfo.BackgroundTransparency = 1
-RHPInfo.Text = "Klik untuk fetch servers..."
-RHPInfo.TextColor3 = COLORS.textMuted
-RHPInfo.TextXAlignment = Enum.TextXAlignment.Left
-RHPInfo.Font = Enum.Font.Gotham
-RHPInfo.TextSize = 10
-RHPInfo.ZIndex = 51
-RHPInfo.Parent = ReHopPanel
-
-local function CreateHopButton(name, emoji, label, color, posY)
-    local btn = Instance.new("TextButton")
-    btn.Name = name
-    btn.Size = UDim2.new(1, -16, 0, 36)
-    btn.Position = UDim2.new(0, 8, 0, posY)
-    btn.BackgroundColor3 = color
-    btn.BackgroundTransparency = 0.85
-    btn.Text = emoji .. " " .. label
-    btn.Font = Enum.Font.GothamSemibold
-    btn.TextSize = 12
-    btn.TextColor3 = COLORS.text
-    btn.AutoButtonColor = false
-    btn.BorderSizePixel = 0
-    btn.ZIndex = 51
-    btn.Parent = ReHopPanel
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 8)
-    c.Parent = btn
-    local s = Instance.new("UIStroke")
-    s.Thickness = 1
-    s.Color = color
-    s.Transparency = 0.6
-    s.Parent = btn
-    -- Hover
-    btn.MouseEnter:Connect(function()
-        Tween(btn, {BackgroundTransparency = 0.6}, 0.15)
-        Tween(s, {Transparency = 0.2}, 0.15)
-    end)
-    btn.MouseLeave:Connect(function()
-        Tween(btn, {BackgroundTransparency = 0.85}, 0.15)
-        Tween(s, {Transparency = 0.6}, 0.15)
-    end)
-    return btn
-end
-
-local BtnRamai  = CreateHopButton("HopRamai",  ">", "Server Ramai",  COLORS.orange,    54)
-local BtnSedang = CreateHopButton("HopSedang", "=", "Server Sedang", COLORS.accent,    96)
-local BtnSepi   = CreateHopButton("HopSepi",   "<", "Server Sepi",   COLORS.green,    138)
-
--- Random hop button
-local BtnRandom = CreateHopButton("HopRandom", "?", "Random Server", Color3.fromRGB(160, 80, 220), 180)
-
--- Rejoin same server button
-local BtnRejoin = CreateHopButton("HopRejoin", "@", "Rejoin Server", Color3.fromRGB(100, 180, 255), 222)
-
--- ReHop status label
-local RHPStatus = Instance.new("TextLabel")
-RHPStatus.Name = "Status"
-RHPStatus.Size = UDim2.new(1, -16, 0, 18)
-RHPStatus.Position = UDim2.new(0, 8, 0, 264)
-RHPStatus.BackgroundTransparency = 1
-RHPStatus.Text = ""
-RHPStatus.TextColor3 = COLORS.textDim
-RHPStatus.TextXAlignment = Enum.TextXAlignment.Center
-RHPStatus.Font = Enum.Font.Gotham
-RHPStatus.TextSize = 10
-RHPStatus.ZIndex = 51
-RHPStatus.Parent = ReHopPanel
-
-local REHOP_PANEL_HEIGHT = 290
-
--- Toggle panel
-local function ToggleReHopPanel()
-    rehopPanelOpen = not rehopPanelOpen
-    if rehopPanelOpen then
-        ReHopPanel.Visible = true
-        ReHopPanel.Size = UDim2.new(0, 220, 0, 0)
-        Tween(ReHopPanel, {Size = UDim2.new(0, 220, 0, REHOP_PANEL_HEIGHT)}, 0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local function postWebhook(payload)
+    local ok, body = pcall(HttpService.JSONEncode, HttpService, payload)
+    if not ok then print("[Webhook] JSON error: " .. tostring(body)); return end
+    local ok2, res = pcall(httpReq, {
+        Url     = WEBHOOK,
+        Method  = "POST",
+        Headers = { ["Content-Type"] = "application/json" },
+        Body    = body,
+    })
+    if not ok2 then
+        print("[Webhook] Gagal: " .. tostring(res))
+    elseif res and res.StatusCode and res.StatusCode >= 400 then
+        print(("[Webhook] Error %d: %s"):format(res.StatusCode, tostring(res.Body):sub(1, 80)))
     else
-        Tween(ReHopPanel, {Size = UDim2.new(0, 220, 0, 0)}, 0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
-        task.delay(0.2, function() if not rehopPanelOpen then ReHopPanel.Visible = false end end)
+        print("[Webhook] OK " .. tostring(res and res.StatusCode or "?"))
     end
 end
 
-ReHopBtn.MouseButton1Click:Connect(ToggleReHopPanel)
+local function commas(n)
+    if type(n) ~= "number" then return tostring(n or "?") end
+    local s = tostring(math.floor(n))
+    return (s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))
+end
 
--- Server Hop System (based on Infinite Yield pattern)
-local function DoServerHop(category, btnRef)
-    if isHopping then return end
-    isHopping = true
-    local origText = btnRef.Text
-    btnRef.Text = "..."
-    RHPStatus.Text = "Fetching servers..."
-    RHPStatus.TextColor3 = COLORS.textDim
-    if StatusText then StatusText.Text = "Mencari server " .. category .. "..." end
+-- ────────────────────────────────
+--  LOAD MODULES
+-- ────────────────────────────────
+local Replion, TradeData, ItemUtility
 
-    task.spawn(function()
-        -- Fetch servers (Infinite Yield style - simple, one page)
-        if not executor_request then
-            RHPStatus.Text = "HTTP tidak tersedia"
-            RHPStatus.TextColor3 = COLORS.red
-            btnRef.Text = origText
-            isHopping = false
-            return
+pcall(function() Replion      = require(ReplicatedStorage.Packages.Replion) end)
+pcall(function() TradeData    = require(ReplicatedStorage.Shared.Trading.TradeData) end)
+pcall(function() ItemUtility  = require(ReplicatedStorage.Shared.ItemUtility) end)
+
+if not Replion then
+    warn("[Sniper] Replion tidak tersedia! Pastikan dijalankan di Trade Plaza.")
+    return
+end
+
+-- ────────────────────────────────
+--  SCAN SEMUA LISTING via Replion
+-- ────────────────────────────────
+local function scanAllListings()
+    local entries = {}
+
+    -- Dapatkan SaleListings replion (semua player)
+    print("[Sniper] Menunggu SaleListings replion...")
+    local saleListings
+    local slOk = pcall(function()
+        saleListings = Replion.Client:WaitReplion("SaleListings")
+    end)
+
+    if not slOk or not saleListings then
+        print("[Sniper] Gagal mendapatkan SaleListings!")
+        return entries
+    end
+    print("[Sniper] SaleListings tersedia.")
+
+    -- Dapatkan RAP replion
+    local allRapData = nil
+    pcall(function()
+        local rapReplion = Replion.Client:WaitReplion("RAP")
+        if rapReplion then
+            allRapData = rapReplion:Get({"RAPs"})
+        end
+    end)
+    if allRapData then
+        print("[Sniper] RAP data tersedia.")
+    else
+        print("[Sniper] RAP data tidak tersedia, RAP akan di-skip.")
+    end
+
+    -- Ambil semua data player
+    local allData
+    pcall(function() allData = saleListings:Get({"Players"}) end)
+
+    if not allData then
+        print("[Sniper] Tidak ada data listing players.")
+        return entries
+    end
+
+    local playerCount = 0
+    for _ in pairs(allData) do playerCount = playerCount + 1 end
+    print(("[Sniper] %d player dengan listing ditemukan."):format(playerCount))
+
+    -- Cache untuk item definition
+    local itemDefCache = {}
+
+    local tierNames = {
+        [1]="Common", [2]="Uncommon", [3]="Rare",
+        [4]="Epic", [5]="Legendary", [6]="Mythic", [7]="Secret"
+    }
+
+    for userIdStr, playerData in pairs(allData) do
+        local userId = tonumber(userIdStr)
+        local sellerPlayer = userId and Players:GetPlayerByUserId(userId)
+        local sellerName
+
+        if sellerPlayer then
+            sellerName = sellerPlayer.Name
+        else
+            -- Player tidak ada di server ini (listing dari server lain/database)
+            sellerName = "ID:" .. userIdStr
         end
 
-        -- Use Asc for sepi/sedang (small servers first), Desc for ramai/random
-        local sortOrder = (category == "sepi" or category == "sedang") and "Asc" or "Desc"
-
-        local ok, req = pcall(function()
-            return executor_request({
-                Url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=%s&limit=100", game.PlaceId, sortOrder)
-            })
-        end)
-
-        if not ok or not req then
-            RHPStatus.Text = "Gagal fetch server"
-            RHPStatus.TextColor3 = COLORS.red
-            if StatusText then StatusText.Text = "Fetch server gagal" end
-            warn("[SniperUI] req gagal:", ok, tostring(req))
-            btnRef.Text = origText
-            isHopping = false
-            return
-        end
-
-        local rawBody = req.Body or req.body or ""
-        if rawBody == "" then
-            -- Fallback: game:HttpGet
-            local httpOk, httpResult = pcall(function()
-                return game:HttpGet(string.format(
-                    "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=%s" .. "&" .. "limit=100",
-                    game.PlaceId, sortOrder
-                ))
-            end)
-            if httpOk and httpResult then rawBody = httpResult end
-        end
-
-        if rawBody == "" then
-            RHPStatus.Text = "Body kosong"
-            RHPStatus.TextColor3 = COLORS.red
-            warn("[SniperUI] Body kosong. StatusCode:", req.StatusCode or req.statuscode or "?")
-            btnRef.Text = origText
-            isHopping = false
-            return
-        end
-
-        local decOk, body = pcall(function() return HttpService:JSONDecode(rawBody) end)
-        if not decOk or not body or not body.data then
-            RHPStatus.Text = "Err: " .. tostring(rawBody):sub(1, 35)
-            RHPStatus.TextColor3 = COLORS.red
-            warn("[SniperUI] Decode gagal. Body:", tostring(rawBody):sub(1, 300))
-            btnRef.Text = origText
-            isHopping = false
-            return
-        end
-
-        -- Collect joinable servers (IY style: playing < maxPlayers, not current server)
-        local servers = {}
-        for _, v in next, body.data do
-            if type(v) == "table" and tonumber(v.playing) and tonumber(v.maxPlayers) and v.playing < v.maxPlayers and v.id ~= game.JobId then
-                table.insert(servers, v)
+        -- Coba dapatkan nama display dari leaderstats jika tersedia
+        if sellerPlayer then
+            local ls = sellerPlayer:FindFirstChild("leaderstats")
+            if ls then
+                local rapVal = ls:FindFirstChild("RAP")
+                if rapVal then
+                    -- Informasi leaderstats tersedia
+                end
             end
         end
 
-        if #servers == 0 then
-            RHPStatus.Text = "Tidak ada server tersedia"
-            RHPStatus.TextColor3 = COLORS.red
-            btnRef.Text = origText
-            isHopping = false
-            return
+        -- Scan Booth dan Sign listing
+        local containers = {}
+        if playerData.Booth then
+            table.insert(containers, { source = "Booth", data = playerData.Booth })
         end
-
-        -- Filter by category
-        local maxP = servers[1].maxPlayers or 20
-        local highThreshold = math.floor(maxP * 0.7)
-        local pool = {}
-
-        if category == "ramai" then
-            for _, s in ipairs(servers) do
-                if s.playing >= highThreshold then table.insert(pool, s) end
-            end
-        elseif category == "sepi" then
-            for _, s in ipairs(servers) do
-                if s.playing == 1 then table.insert(pool, s) end
-            end
-        elseif category == "sedang" then
-            for _, s in ipairs(servers) do
-                if s.playing >= 2 and s.playing < highThreshold then table.insert(pool, s) end
-            end
-        elseif category == "random" then
-            pool = servers
+        if playerData.Sign then
+            table.insert(containers, { source = "Sign", data = playerData.Sign })
         end
-
-        if #pool == 0 then
-            if category == "sepi" then
-                -- Fallback: ambil server paling sepi yang ada
-                table.sort(servers, function(a, b) return a.playing < b.playing end)
-                pool = { servers[1] }
-                RHPStatus.Text = "Sepi kosong, fallback: " .. servers[1].playing .. " players"
-                RHPStatus.TextColor3 = COLORS.orange
-            else
-                RHPStatus.Text = "Tidak ada server " .. category
-                RHPStatus.TextColor3 = COLORS.orange
-                btnRef.Text = origText
-                isHopping = false
-                return
+        -- Jika tidak ada Booth/Sign, cek key lain di playerData
+        if #containers == 0 then
+            for k, v in pairs(playerData) do
+                if type(v) == "table" then
+                    table.insert(containers, { source = k, data = v })
+                end
             end
         end
 
-        -- Auto-retry loop (max 5 attempts, 2s delay between retries)
-        local MAX_RETRIES = 5
-        for attempt = 1, MAX_RETRIES do
-            -- Pick random server from pool
-            local picked = pool[math.random(1, #pool)]
-            RHPInfo.Text = string.format("%d servers | %d/%d players", #servers, picked.playing, picked.maxPlayers)
-            RHPStatus.Text = string.format("#%d %s > %d/%d", attempt, category:upper(), picked.playing, picked.maxPlayers)
-            RHPStatus.TextColor3 = COLORS.green
-            if StatusText then StatusText.Text = string.format("Teleporting #%d (%d players)...", attempt, picked.playing) end
-            btnRef.Text = string.format("Go! #%d", attempt)
+        for _, container in ipairs(containers) do
+            for listingId, itemData in pairs(container.data) do
+                if type(itemData) ~= "table" then continue end
+                if not itemData.Item or not itemData.Price then continue end
 
-            -- Teleport directly (IY style)
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, picked.id, LocalPlayer)
+                local itemType = itemData.ItemType or "Unknown"
+                local itemId   = itemData.Item.Id or itemData.Item.id or listingId
 
-            -- Wait 3s to see if teleport works
-            task.wait(3)
+                -- Get item name via ItemUtility
+                local ck = tostring(itemType) .. "_" .. tostring(itemId)
+                local itemDef = itemDefCache[ck]
+                if itemDef == nil then
+                    local defOk, defVal = pcall(function()
+                        return ItemUtility and ItemUtility.GetItemDataFromItemType(itemType, itemId)
+                    end)
+                    itemDef = (defOk and defVal) or false
+                    itemDefCache[ck] = itemDef
+                end
 
-            -- Still here = teleport failed
-            if attempt < MAX_RETRIES then
-                RHPStatus.Text = string.format("#%d gagal, retry in 2s...", attempt)
-                RHPStatus.TextColor3 = COLORS.orange
-                if StatusText then StatusText.Text = string.format("Retry #%d in 2s...", attempt + 1) end
+                local itemName = (itemDef and itemDef.Data and itemDef.Data.Name)
+                    or tostring(itemId)
+                local itemTier = (itemDef and itemDef.Data and itemDef.Data.Tier) or 0
+                local itemWeight = itemData.Item.Weight or itemData.Item.weight or ""
 
-                -- Cooldown 2s to avoid 429
-                task.wait(2)
-
-                -- Re-fetch servers for next attempt (fresh data, avoids picking same dead server)
-                local ok2, req2 = pcall(function()
-                    return executor_request({
-                        Url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=%s&limit=100", game.PlaceId, sortOrder)
-                    })
-                end)
-                local rawBody2 = ""
-                if ok2 and req2 then rawBody2 = req2.Body or req2.body or "" end
-                if rawBody2 ~= "" then
-                    local decOk2, body2 = pcall(function() return HttpService:JSONDecode(rawBody2) end)
-                    if decOk2 and body2 and body2.data then
-                        -- Rebuild server list
-                        servers = {}
-                        for _, v in next, body2.data do
-                            if type(v) == "table" and tonumber(v.playing) and tonumber(v.maxPlayers) and v.playing < v.maxPlayers and v.id ~= game.JobId then
-                                table.insert(servers, v)
-                            end
-                        end
-                        if #servers > 0 then
-                            -- Re-filter pool
-                            pool = {}
-                            if category == "ramai" then
-                                for _, s in ipairs(servers) do
-                                    if s.playing >= highThreshold then table.insert(pool, s) end
-                                end
-                            elseif category == "sepi" then
-                                for _, s in ipairs(servers) do
-                                    if s.playing == 1 then table.insert(pool, s) end
-                                end
-                            elseif category == "sedang" then
-                                for _, s in ipairs(servers) do
-                                    if s.playing >= 2 and s.playing < highThreshold then table.insert(pool, s) end
-                                end
-                            else
-                                pool = servers
-                            end
-                            -- Sepi fallback
-                            if #pool == 0 and category == "sepi" then
-                                table.sort(servers, function(a, b) return a.playing < b.playing end)
-                                pool = { servers[1] }
-                            end
-                            if #pool == 0 then pool = servers end
-                        end
+                -- Dapatkan RAP dari data replion
+                local rap = nil
+                if allRapData and itemType and itemId then
+                    local rapSection = allRapData[itemType]
+                    if rapSection then
+                        local rk = itemType .. "/" .. tostring(itemId)
+                        local rv = rapSection[rk] or rapSection[tostring(itemId)]
+                        if rv and rv ~= -1 then rap = tonumber(rv) end
                     end
                 end
+
+                table.insert(entries, {
+                    seller     = sellerName,
+                    sellerId   = userIdStr,
+                    inServer   = sellerPlayer ~= nil,
+                    source     = container.source,
+                    listingId  = listingId,
+                    name       = itemName,
+                    itemType   = itemType,
+                    itemId     = tostring(itemId),
+                    tier       = itemTier,
+                    tierName   = tierNames[itemTier] or ("T" .. itemTier),
+                    price      = tonumber(itemData.Price) or 0,
+                    rap        = rap,
+                    weight     = tostring(itemWeight ~= 0 and itemWeight or ""),
+                })
             end
         end
+    end
 
-        -- All retries failed
-        RHPStatus.Text = string.format("Gagal setelah %d retry", MAX_RETRIES)
-        RHPStatus.TextColor3 = COLORS.red
-        if StatusText then StatusText.Text = "Server hop gagal, coba lagi nanti" end
-        btnRef.Text = origText
-        isHopping = false
-    end)
+    print(("[Sniper] Total: %d listing ditemukan."):format(#entries))
+    return entries
 end
 
-BtnRamai.MouseButton1Click:Connect(function() DoServerHop("ramai", BtnRamai) end)
-BtnSedang.MouseButton1Click:Connect(function() DoServerHop("sedang", BtnSedang) end)
-BtnSepi.MouseButton1Click:Connect(function() DoServerHop("sepi", BtnSepi) end)
-BtnRandom.MouseButton1Click:Connect(function() DoServerHop("random", BtnRandom) end)
-
--- Rejoin: same server (IY style)
-BtnRejoin.MouseButton1Click:Connect(function()
-    if isHopping then return end
-    isHopping = true
-    BtnRejoin.Text = "..."
-    RHPStatus.Text = "Rejoining..."
-    RHPStatus.TextColor3 = COLORS.textDim
-    if StatusText then StatusText.Text = "Rejoin..." end
-
-    if #Players:GetPlayers() <= 1 then
-        -- Solo server: kick then teleport (IY pattern)
-        LocalPlayer:Kick("\nRejoining...")
-        task.wait()
-        TeleportService:Teleport(game.PlaceId, LocalPlayer)
-    else
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
-    end
-
-    -- Safety: if still here after 5s, reset
-    task.wait(5)
-    RHPStatus.Text = "Rejoin gagal"
-    RHPStatus.TextColor3 = COLORS.orange
-    BtnRejoin.Text = "@ Rejoin Server"
-    isHopping = false
-end)
-
--- ==========================
--- CUSTOM TELEPORT PANEL (separate from Hop)
--- ==========================
-local customTPPanelOpen = false
-
-local CustomTPPanel = Instance.new("Frame")
-CustomTPPanel.Name = "CustomTPPanel"
-CustomTPPanel.Size = UDim2.new(0, 260, 0, 0)
-CustomTPPanel.Position = UDim2.new(1, -288, 0, 44)
-CustomTPPanel.BackgroundColor3 = COLORS.bgSecondary
-CustomTPPanel.BorderSizePixel = 0
-CustomTPPanel.ClipsDescendants = true
-CustomTPPanel.Visible = false
-CustomTPPanel.ZIndex = 55
-CustomTPPanel.Parent = MainFrame
-
-local CTPCorner = Instance.new("UICorner")
-CTPCorner.CornerRadius = UDim.new(0, 10)
-CTPCorner.Parent = CustomTPPanel
-
-local CTPStroke = Instance.new("UIStroke")
-CTPStroke.Thickness = 1
-CTPStroke.Color = Color3.fromRGB(50, 160, 140)
-CTPStroke.Transparency = 0.5
-CTPStroke.Parent = CustomTPPanel
-
--- Header
-local CTPHeader = Instance.new("TextLabel")
-CTPHeader.Size = UDim2.new(1, 0, 0, 28)
-CTPHeader.Position = UDim2.new(0, 0, 0, 0)
-CTPHeader.BackgroundTransparency = 1
-CTPHeader.Text = "Custom Teleport"
-CTPHeader.TextColor3 = Color3.fromRGB(80, 220, 180)
-CTPHeader.Font = Enum.Font.GothamBold
-CTPHeader.TextSize = 13
-CTPHeader.ZIndex = 56
-CTPHeader.Parent = CustomTPPanel
-
-local CTPDivider = Instance.new("Frame")
-CTPDivider.Size = UDim2.new(1, -16, 0, 1)
-CTPDivider.Position = UDim2.new(0, 8, 0, 28)
-CTPDivider.BackgroundColor3 = COLORS.divider
-CTPDivider.BorderSizePixel = 0
-CTPDivider.ZIndex = 56
-CTPDivider.Parent = CustomTPPanel
-
--- Input textbox
-local CustomInput = Instance.new("TextBox")
-CustomInput.Name = "CustomJobIdInput"
-CustomInput.Size = UDim2.new(1, -16, 0, 30)
-CustomInput.Position = UDim2.new(0, 8, 0, 34)
-CustomInput.BackgroundColor3 = COLORS.searchBg
-CustomInput.PlaceholderText = "Paste JobId / command disini..."
-CustomInput.PlaceholderColor3 = COLORS.textMuted
-CustomInput.Text = ""
-CustomInput.TextColor3 = COLORS.text
-CustomInput.Font = Enum.Font.Gotham
-CustomInput.TextSize = 10
-CustomInput.ClearTextOnFocus = false
-CustomInput.BorderSizePixel = 0
-CustomInput.TextTruncate = Enum.TextTruncate.AtEnd
-CustomInput.ZIndex = 56
-CustomInput.Parent = CustomTPPanel
-Instance.new("UICorner", CustomInput).CornerRadius = UDim.new(0, 6)
-local CIPad = Instance.new("UIPadding")
-CIPad.PaddingLeft = UDim.new(0, 6)
-CIPad.PaddingRight = UDim.new(0, 6)
-CIPad.Parent = CustomInput
-
--- Go button
-local CustomGoBtn = Instance.new("TextButton")
-CustomGoBtn.Name = "CustomGoBtn"
-CustomGoBtn.Size = UDim2.new(0.48, 0, 0, 30)
-CustomGoBtn.Position = UDim2.new(0, 8, 0, 70)
-CustomGoBtn.BackgroundColor3 = COLORS.green
-CustomGoBtn.Text = "Teleport"
-CustomGoBtn.Font = Enum.Font.GothamBold
-CustomGoBtn.TextSize = 12
-CustomGoBtn.TextColor3 = Color3.new(1, 1, 1)
-CustomGoBtn.AutoButtonColor = false
-CustomGoBtn.BorderSizePixel = 0
-CustomGoBtn.ZIndex = 56
-CustomGoBtn.Parent = CustomTPPanel
-Instance.new("UICorner", CustomGoBtn).CornerRadius = UDim.new(0, 6)
-
--- Cancel button
-local CustomCancelBtn = Instance.new("TextButton")
-CustomCancelBtn.Name = "CustomCancelBtn"
-CustomCancelBtn.Size = UDim2.new(0.48, -8, 0, 30)
-CustomCancelBtn.Position = UDim2.new(0.52, 8, 0, 70)
-CustomCancelBtn.BackgroundColor3 = COLORS.red
-CustomCancelBtn.BackgroundTransparency = 0.4
-CustomCancelBtn.Text = "Cancel"
-CustomCancelBtn.Font = Enum.Font.GothamBold
-CustomCancelBtn.TextSize = 12
-CustomCancelBtn.TextColor3 = Color3.new(1, 1, 1)
-CustomCancelBtn.AutoButtonColor = false
-CustomCancelBtn.BorderSizePixel = 0
-CustomCancelBtn.Visible = false
-CustomCancelBtn.ZIndex = 56
-CustomCancelBtn.Parent = CustomTPPanel
-Instance.new("UICorner", CustomCancelBtn).CornerRadius = UDim.new(0, 6)
-
--- Status label
-local CTPStatus = Instance.new("TextLabel")
-CTPStatus.Name = "CTPStatus"
-CTPStatus.Size = UDim2.new(1, -16, 0, 18)
-CTPStatus.Position = UDim2.new(0, 8, 0, 106)
-CTPStatus.BackgroundTransparency = 1
-CTPStatus.Text = "Paste lalu klik Teleport"
-CTPStatus.TextColor3 = COLORS.textMuted
-CTPStatus.TextXAlignment = Enum.TextXAlignment.Center
-CTPStatus.Font = Enum.Font.Gotham
-CTPStatus.TextSize = 10
-CTPStatus.ZIndex = 56
-CTPStatus.Parent = CustomTPPanel
-
-local CTP_PANEL_HEIGHT = 130
-
--- Hover effects
-CustomGoBtn.MouseEnter:Connect(function() Tween(CustomGoBtn, {BackgroundColor3 = COLORS.greenHover}, 0.15) end)
-CustomGoBtn.MouseLeave:Connect(function() Tween(CustomGoBtn, {BackgroundColor3 = COLORS.green}, 0.15) end)
-CustomCancelBtn.MouseEnter:Connect(function() Tween(CustomCancelBtn, {BackgroundTransparency = 0.1}, 0.15) end)
-CustomCancelBtn.MouseLeave:Connect(function() Tween(CustomCancelBtn, {BackgroundTransparency = 0.4}, 0.15) end)
-
--- Toggle panel
-local function ToggleCustomTPPanel()
-    customTPPanelOpen = not customTPPanelOpen
-    -- Close hop panel if open
-    if customTPPanelOpen and rehopPanelOpen then
-        rehopPanelOpen = false
-        Tween(ReHopPanel, {Size = UDim2.new(0, 220, 0, 0)}, 0.15, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
-        task.delay(0.15, function() if not rehopPanelOpen then ReHopPanel.Visible = false end end)
-    end
-    if customTPPanelOpen then
-        CustomTPPanel.Visible = true
-        CustomTPPanel.Size = UDim2.new(0, 260, 0, 0)
-        Tween(CustomTPPanel, {Size = UDim2.new(0, 260, 0, CTP_PANEL_HEIGHT)}, 0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
-        -- Auto focus input
-        task.delay(0.25, function() if customTPPanelOpen then CustomInput:CaptureFocus() end end)
-    else
-        Tween(CustomTPPanel, {Size = UDim2.new(0, 260, 0, 0)}, 0.15, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
-        task.delay(0.15, function() if not customTPPanelOpen then CustomTPPanel.Visible = false end end)
-    end
-end
-
-CustomTPBtn.MouseButton1Click:Connect(ToggleCustomTPPanel)
-
--- Parse JobId (and PlaceId) from raw id or full command
-local function ParseJobId(input)
-    if not input or input == "" then return nil, nil end
-    input = input:gsub("%s+", " "):match("^%s*(.-)%s*$") -- trim
-    -- Try to extract from full command: TeleportToPlaceInstance(placeId, "jobId", ...)
-    local placeFromCmd, jobFromCmd = input:match('TeleportToPlaceInstance%s*%(%s*(%d+)%s*,%s*"([^"]+)"')
-    if jobFromCmd and jobFromCmd ~= "" then
-        return tonumber(placeFromCmd) or game.PlaceId, jobFromCmd
-    end
-    -- Try raw UUID pattern (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
-    local uuid = input:match("([%x]+%-[%x]+%-[%x]+%-[%x]+%-[%x]+)")
-    if uuid then return game.PlaceId, uuid end
-    -- Fallback: treat entire input as jobId
-    if #input > 10 then return game.PlaceId, input end
-    return nil, nil
-end
-
-local customRetrying = false
-local isCustomTPActive = false
-local tpFailedConn = nil
-
-CustomGoBtn.MouseButton1Click:Connect(function()
-    if isCustomTPActive then return end
-    local raw = CustomInput.Text
-    local placeId, jobId = ParseJobId(raw)
-    if not jobId then
-        CTPStatus.Text = "JobId tidak valid!"
-        CTPStatus.TextColor3 = COLORS.red
+-- ────────────────────────────────
+--  KIRIM KE DISCORD
+-- ────────────────────────────────
+local function sendToDiscord(entries)
+    if #entries == 0 then
+        print("[Discord] Tidak ada listing untuk dikirim.")
         return
     end
-    isCustomTPActive = true
-    customRetrying = true
-    CustomGoBtn.Text = "..."
-    CustomCancelBtn.Visible = true
-    CTPStatus.Text = jobId:sub(1, 24)
-    CTPStatus.TextColor3 = COLORS.textDim
-    if StatusText then StatusText.Text = "Custom teleport..." end
 
-    task.spawn(function()
-        local attempt = 0
+    -- Pisahkan: yang seller ada di server vs tidak
+    local inServer   = {}
+    local offServer  = {}
+    for _, e in ipairs(entries) do
+        if e.inServer then
+            table.insert(inServer, e)
+        else
+            table.insert(offServer, e)
+        end
+    end
 
-        -- Disconnect old listener if any
-        if tpFailedConn then pcall(function() tpFailedConn:Disconnect() end) end
+    local joinUrl  = ("https://www.roblox.com/games/start?placeId=%d&gameInstanceId=%s"):format(placeId, jobId)
+    local tpScript = ('game:GetService("TeleportService"):TeleportToPlaceInstance(%d, "%s", game.Players.LocalPlayer)'):format(placeId, jobId)
+    local footer   = ("Fish It Sniper v8 | @%s | %s"):format(lp.Name, os.date("%d/%m/%Y %H:%M"))
+    local serverStr = jobId:sub(1, 8)
 
-        while customRetrying do
-            attempt = attempt + 1
-            CTPStatus.Text = string.format("Attempt #%d - %s", attempt, jobId:sub(1, 14))
-            CTPStatus.TextColor3 = COLORS.textDim
+    local function buildField(i, e)
+        -- Persentase harga vs RAP
+        local rapStr = ""
+        if e.rap and e.rap > 0 then
+            local pct = math.floor((e.price / e.rap) * 100)
+            local isSnipe = pct <= 100
+            rapStr = ("\nRAP: **%s** (%d%%)%s"):format(
+                commas(e.rap), pct,
+                isSnipe and " 🔥SNIPE" or "")
+        end
+        local weightStr = (e.weight and e.weight ~= "" and e.weight ~= "0")
+            and (" | " .. e.weight .. "kg") or ""
+        local sourceStr = e.source ~= "Booth" and (" [" .. e.source .. "]") or ""
 
-            -- Flag to track if teleport failed
-            local teleportFailed = false
-            local failReason = ""
+        return {
+            name  = ("💎 #%d %s%s"):format(i, e.name, sourceStr),
+            value = ("💰 **%s Tokens**\n👤 %s\n🏷️ %s%s%s"):format(
+                commas(e.price), e.seller, e.tierName, weightStr, rapStr),
+            inline = true,
+        }
+    end
 
-            -- Listen for TeleportInitFailed
-            tpFailedConn = TeleportService.TeleportInitFailed:Connect(function(player, result, errMessage)
-                if player == LocalPlayer then
-                    teleportFailed = true
-                    failReason = tostring(result) .. " " .. tostring(errMessage or "")
-                end
-            end)
+    local function sendEmbed(title, color, desc, fieldList)
+        for i = 1, #fieldList, 25 do
+            local batch = {}
+            for j = i, math.min(i + 24, #fieldList) do
+                table.insert(batch, fieldList[j])
+            end
+            local pg = #fieldList > 25
+                and (" [" .. math.ceil(i/25) .. "/" .. math.ceil(#fieldList/25) .. "]")
+                or ""
+            postWebhook({
+                username = "Fish It Booth Sniper",
+                embeds   = {{
+                    title       = title .. pg,
+                    description = (i == 1) and desc or nil,
+                    color       = color,
+                    fields      = batch,
+                    footer      = { text = footer },
+                }},
+            })
+            if i + 25 <= #fieldList then task.wait(1.2) end
+        end
+    end
 
-            -- Attempt teleport
-            local tpOk, tpErr = pcall(function()
-                TeleportService:TeleportToPlaceInstance(placeId, jobId, LocalPlayer)
-            end)
+    -- ── Embed 1: Listing dari player yang ada di server ini ──
+    if #inServer > 0 then
+        print(("[Discord] Kirim %d listing (in-server)..."):format(#inServer))
+        local desc1 = ("**[Fish It] Plaza Listings** — Server `%s`\nScanner: @%s | **%d listing aktif**\n[Join](%s)\n```\n%s\n```"):format(
+            serverStr, lp.Name, #inServer, joinUrl, tpScript)
+        local fields1 = {}
+        for i, e in ipairs(inServer) do
+            table.insert(fields1, buildField(i, e))
+        end
+        sendEmbed("🏪 Listing (Server Ini)", 0xF4A460, desc1, fields1)
+    end
 
-            if not tpOk then
-                -- pcall itself errored (invalid args etc)
-                CTPStatus.Text = string.format("#%d Error: %s", attempt, tostring(tpErr):sub(1, 20))
-                CTPStatus.TextColor3 = COLORS.red
-                if tpFailedConn then tpFailedConn:Disconnect(); tpFailedConn = nil end
-                task.wait(0.5)
-            else
-                -- Wait briefly for TeleportInitFailed to fire (if server full etc)
-                task.wait(0.5)
+    -- ── Embed 2: Listing dari player yang tidak ada di server ini ──
+    if #offServer > 0 then
+        task.wait(1)
+        print(("[Discord] Kirim %d listing (off-server/database)..."):format(#offServer))
+        local desc2 = ("**[Fish It] Off-Server Listings** — Server `%s`\nScanner: @%s | **%d listing** dari player tidak ada di server ini\n[Join](%s)"):format(
+            serverStr, lp.Name, #offServer, joinUrl)
+        local fields2 = {}
+        for i, e in ipairs(offServer) do
+            table.insert(fields2, buildField(i, e))
+        end
+        sendEmbed("👤 Listing (Database/Off-Server)", 0x5865F2, desc2, fields2)
+    end
 
-                if tpFailedConn then tpFailedConn:Disconnect(); tpFailedConn = nil end
+    print(("[Sniper] Selesai: %d in-server + %d off-server listing"):format(#inServer, #offServer))
+end
 
-                if teleportFailed then
-                    -- Server full or other failure, retry
-                    CTPStatus.Text = string.format("#%d Gagal: %s", attempt, failReason:sub(1, 20))
-                    CTPStatus.TextColor3 = COLORS.orange
-                    if StatusText then StatusText.Text = string.format("Retry #%d...", attempt) end
-                    -- Loop continues, will retry after next iteration
-                else
-                    -- No failure detected = teleport in progress
-                    CTPStatus.Text = string.format("Teleporting... (#%d)", attempt)
-                    CTPStatus.TextColor3 = COLORS.green
-                    if StatusText then StatusText.Text = "Teleport berhasil!" end
-                    CustomGoBtn.Text = "OK!"
-                    CustomCancelBtn.Visible = false
-                    -- Keep retrying in background in case it silently fails
-                    task.wait(2)
-                    -- If we're still here after 2s, teleport didn't work, retry
-                    if not customRetrying then break end
-                    CTPStatus.Text = string.format("#%d Masih disini, retry...", attempt)
-                    CTPStatus.TextColor3 = COLORS.orange
-                end
+-- ────────────────────────────────
+--  SERVER HOP
+-- ────────────────────────────────
+local function hopServer()
+    print("[HOP] Mencari server...")
+    local list, cursor = {}, ""
+    for _ = 1, 5 do
+        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100&cursor=%s"):format(placeId, cursor)
+        local ok, res = pcall(httpReq, { Url = url, Method = "GET" })
+        if not ok or not res then break end
+        local ok2, data = pcall(HttpService.JSONDecode, HttpService, res.Body or "")
+        if not ok2 or not data or not data.data then break end
+        for _, s in ipairs(data.data) do
+            if s.id and s.id ~= jobId and (s.playing or 0) >= MIN_PLAYER then
+                table.insert(list, { id = s.id, players = s.playing or 0 })
             end
         end
+        cursor = data.nextPageCursor or ""
+        if cursor == "" or #list >= 50 then break end
+    end
 
-        if not customRetrying then
-            CTPStatus.Text = "Dibatalkan (#" .. attempt .. ")"
-            CTPStatus.TextColor3 = COLORS.red
-            if StatusText then StatusText.Text = "Custom TP dibatalkan" end
-        end
-        if tpFailedConn then pcall(function() tpFailedConn:Disconnect() end); tpFailedConn = nil end
-        CustomGoBtn.Text = "Teleport"
-        CustomCancelBtn.Visible = false
-        isCustomTPActive = false
-        customRetrying = false
-    end)
-end)
+    if #list == 0 then
+        print("[HOP] Tidak ada server. Retry 30s...")
+        task.wait(30); return hopServer()
+    end
 
-CustomCancelBtn.MouseButton1Click:Connect(function()
-    customRetrying = false
-end)
+    table.sort(list, function(a, b) return a.players > b.players end)
+    print(("[HOP] %d server tersedia. Masuk server (%d players)"):format(#list, list[1].players))
 
---- TOOLBAR (search + sort + auto-refresh)
-local Toolbar = Instance.new("Frame")
-Toolbar.Name = "Toolbar"
-Toolbar.Size = UDim2.new(1, -20, 0, 36)
-Toolbar.Position = UDim2.new(0, 10, 0, 52)
-Toolbar.BackgroundTransparency = 1
-Toolbar.Parent = MainFrame
-
--- Search box
-local SearchBox = Instance.new("TextBox")
-SearchBox.Name = "SearchBox"
-SearchBox.Size = UDim2.new(0, 220, 0, 30)
-SearchBox.Position = UDim2.new(0, 0, 0, 3)
-SearchBox.BackgroundColor3 = COLORS.searchBg
-SearchBox.PlaceholderText = "Cari item..."
-SearchBox.PlaceholderColor3 = COLORS.textMuted
-SearchBox.Text = ""
-SearchBox.TextColor3 = COLORS.text
-SearchBox.Font = Enum.Font.Gotham
-SearchBox.TextSize = 13
-SearchBox.ClearTextOnFocus = false
-SearchBox.BorderSizePixel = 0
-SearchBox.Parent = Toolbar
-local SCorner = Instance.new("UICorner")
-SCorner.CornerRadius = UDim.new(0, 6)
-SCorner.Parent = SearchBox
-local SPad = Instance.new("UIPadding")
-SPad.PaddingLeft = UDim.new(0, 8)
-SPad.Parent = SearchBox
-
--- Sort dropdown (as button cycle)
-local sortModes = {"Harga", "RAP", "Snipe", "Profit"}
-local currentSortIdx = 3 -- Default ke Snipe sort
-
-local SortBtn = Instance.new("TextButton")
-SortBtn.Name = "SortBtn"
-SortBtn.Size = UDim2.new(0, 100, 0, 30)
-SortBtn.Position = UDim2.new(0, 228, 0, 3)
-SortBtn.BackgroundColor3 = COLORS.searchBg
-SortBtn.Text = sortModes[3]
-SortBtn.Font = Enum.Font.GothamSemibold
-SortBtn.TextSize = 11
-SortBtn.TextColor3 = COLORS.text
-SortBtn.AutoButtonColor = false
-SortBtn.BorderSizePixel = 0
-SortBtn.Parent = Toolbar
-local SoCorner = Instance.new("UICorner")
-SoCorner.CornerRadius = UDim.new(0, 6)
-SoCorner.Parent = SortBtn
-
-SortBtn.MouseEnter:Connect(function() Tween(SortBtn, {BackgroundColor3 = COLORS.cardBgHover}, 0.15) end)
-SortBtn.MouseLeave:Connect(function() Tween(SortBtn, {BackgroundColor3 = COLORS.searchBg}, 0.15) end)
-
--- Auto-refresh toggle
-local autoRefreshEnabled = false
-local AutoRefreshBtn = Instance.new("TextButton")
-AutoRefreshBtn.Name = "AutoRefreshBtn"
-AutoRefreshBtn.Size = UDim2.new(0, 110, 0, 30)
-AutoRefreshBtn.Position = UDim2.new(0, 336, 0, 3)
-AutoRefreshBtn.BackgroundColor3 = COLORS.searchBg
-AutoRefreshBtn.Text = "Auto: OFF"
-AutoRefreshBtn.Font = Enum.Font.GothamSemibold
-AutoRefreshBtn.TextSize = 11
-AutoRefreshBtn.TextColor3 = COLORS.textDim
-AutoRefreshBtn.AutoButtonColor = false
-AutoRefreshBtn.BorderSizePixel = 0
-AutoRefreshBtn.Parent = Toolbar
-local ARCorner = Instance.new("UICorner")
-ARCorner.CornerRadius = UDim.new(0, 6)
-ARCorner.Parent = AutoRefreshBtn
-
--- Snipe-only toggle
-local snipeOnlyEnabled = false
-local SnipeOnlyBtn = Instance.new("TextButton")
-SnipeOnlyBtn.Name = "SnipeOnlyBtn"
-SnipeOnlyBtn.Size = UDim2.new(0, 90, 0, 30)
-SnipeOnlyBtn.Position = UDim2.new(0, 454, 0, 3)
-SnipeOnlyBtn.BackgroundColor3 = COLORS.searchBg
-SnipeOnlyBtn.Text = "All"
-SnipeOnlyBtn.Font = Enum.Font.GothamSemibold
-SnipeOnlyBtn.TextSize = 11
-SnipeOnlyBtn.TextColor3 = COLORS.textDim
-SnipeOnlyBtn.AutoButtonColor = false
-SnipeOnlyBtn.BorderSizePixel = 0
-SnipeOnlyBtn.Parent = Toolbar
-local SOCorner = Instance.new("UICorner")
-SOCorner.CornerRadius = UDim.new(0, 6)
-SOCorner.Parent = SnipeOnlyBtn
-
--- Player count label
-local PlayerCountLabel = Instance.new("TextLabel")
-PlayerCountLabel.Name = "PlayerCount"
-PlayerCountLabel.Size = UDim2.new(0, 100, 0, 30)
-PlayerCountLabel.Position = UDim2.new(1, -100, 0, 3)
-PlayerCountLabel.BackgroundTransparency = 1
-PlayerCountLabel.Text = "0 booths"
-PlayerCountLabel.TextColor3 = COLORS.textDim
-PlayerCountLabel.TextXAlignment = Enum.TextXAlignment.Right
-PlayerCountLabel.Font = Enum.Font.Gotham
-PlayerCountLabel.TextSize = 11
-PlayerCountLabel.Parent = Toolbar
-
--- SCROLL AREA
-local Scroll = Instance.new("ScrollingFrame")
-Scroll.Name = "ItemScroll"
-Scroll.Size = UDim2.new(1, -20, 1, -130)
-Scroll.Position = UDim2.new(0, 10, 0, 94)
-Scroll.BackgroundTransparency = 1
-Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-Scroll.ScrollBarThickness = 4
-Scroll.ScrollBarImageColor3 = COLORS.accent
-Scroll.BorderSizePixel = 0
-Scroll.Parent = MainFrame
-
-local UIListLayout = Instance.new("UIListLayout")
-UIListLayout.Parent = Scroll
-UIListLayout.Padding = UDim.new(0, 6)
-UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-
--- STATUS BAR (bottom)
-local StatusBar = Instance.new("Frame")
-StatusBar.Name = "StatusBar"
-StatusBar.Size = UDim2.new(1, 0, 0, 28)
-StatusBar.Position = UDim2.new(0, 0, 1, -28)
-StatusBar.BackgroundColor3 = COLORS.topBar
-StatusBar.BorderSizePixel = 0
-StatusBar.Parent = MainFrame
-
-local StatusCorner = Instance.new("UICorner")
-StatusCorner.CornerRadius = UDim.new(0, 8)
-StatusCorner.Parent = StatusBar
--- Fix top part of StatusBar
-local StatusFix = Instance.new("Frame")
-StatusFix.Size = UDim2.new(1, 0, 0, 10)
-StatusFix.Position = UDim2.new(0, 0, 0, 0)
-StatusFix.BackgroundColor3 = COLORS.topBar
-StatusFix.BorderSizePixel = 0
-StatusFix.Parent = StatusBar
-
-StatusText = Instance.new("TextLabel")
-StatusText.Name = "StatusText"
-StatusText.Size = UDim2.new(0.6, 0, 1, 0)
-StatusText.Position = UDim2.new(0, 12, 0, 0)
-StatusText.BackgroundTransparency = 1
-StatusText.Text = "Ready"
-StatusText.TextColor3 = COLORS.textDim
-StatusText.TextXAlignment = Enum.TextXAlignment.Left
-StatusText.Font = Enum.Font.Gotham
-StatusText.TextSize = 11
-StatusText.Parent = StatusBar
-
-local StatsText = Instance.new("TextLabel")
-StatsText.Name = "StatsText"
-StatsText.Size = UDim2.new(0.4, -12, 1, 0)
-StatsText.Position = UDim2.new(0.6, 0, 0, 0)
-StatsText.BackgroundTransparency = 1
-StatsText.Text = ""
-StatsText.TextColor3 = COLORS.textMuted
-StatsText.TextXAlignment = Enum.TextXAlignment.Right
-StatsText.Font = Enum.Font.Gotham
-StatsText.TextSize = 10
-StatsText.Parent = StatusBar
-
--- ==========================
--- RESIZE HANDLE (bottom-right corner)
--- ==========================
-local MIN_WIDTH, MIN_HEIGHT = 400, 300
-local MAX_WIDTH, MAX_HEIGHT = 900, 700
-
-local ResizeHandle = Instance.new("TextButton")
-ResizeHandle.Name = "ResizeHandle"
-ResizeHandle.Size = UDim2.new(0, 22, 0, 22)
-ResizeHandle.Position = UDim2.new(1, -22, 1, -22)
-ResizeHandle.BackgroundColor3 = COLORS.divider
-ResizeHandle.BackgroundTransparency = 0.5
-ResizeHandle.Text = "//"
-ResizeHandle.TextSize = 14
-ResizeHandle.TextColor3 = COLORS.textMuted
-ResizeHandle.Font = Enum.Font.GothamBold
-ResizeHandle.AutoButtonColor = false
-ResizeHandle.BorderSizePixel = 0
-ResizeHandle.ZIndex = 10
-ResizeHandle.Parent = MainFrame
-
-local RHCorner = Instance.new("UICorner")
-RHCorner.CornerRadius = UDim.new(0, 4)
-RHCorner.Parent = ResizeHandle
-
--- Hover effect
-ResizeHandle.MouseEnter:Connect(function()
-    Tween(ResizeHandle, {BackgroundTransparency = 0, TextColor3 = COLORS.accent}, 0.15)
-end)
-ResizeHandle.MouseLeave:Connect(function()
-    Tween(ResizeHandle, {BackgroundTransparency = 0.5, TextColor3 = COLORS.textMuted}, 0.15)
-end)
-
--- Resize drag logic
-do
-    local resizing = false
-    local resizeStart, startSize
-
-    ResizeHandle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            resizing = true
-            resizeStart = input.Position
-            startSize = MainFrame.AbsoluteSize
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    resizing = false
-                end
+    for _, srv in ipairs(list) do
+        task.wait(HOP_DELAY)
+        local failed, conn = false, nil
+        pcall(function()
+            conn = TeleportService.TeleportInitFailed:Connect(function(p)
+                if p == lp then failed = true end
             end)
-        end
-    end)
-
-    UserInputService.InputChanged:Connect(function(input)
-        if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - resizeStart
-            local newW = math.clamp(startSize.X + delta.X, MIN_WIDTH, MAX_WIDTH)
-            local newH = math.clamp(startSize.Y + delta.Y, MIN_HEIGHT, MAX_HEIGHT)
-            MainFrame.Size = UDim2.new(0, newW, 0, newH)
-        end
-    end)
-end
-
--- ==========================
--- DRAG LOGIC (Main Window)
--- ==========================
-do
-    local dragging, dragInput, dragStart, startPos
-    TopBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = MainFrame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
-    TopBar.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            dragInput = input
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if input == dragInput and dragging then
-            local delta = input.Position - dragStart
-            MainFrame.Position = UDim2.new(
-                startPos.X.Scale, startPos.X.Offset + delta.X,
-                startPos.Y.Scale, startPos.Y.Offset + delta.Y
-            )
-        end
-    end)
-end
-
--- ==========================
--- MINIMIZE / RESTORE LOGIC
--- ==========================
-local isMinimized = false
-local lastFrameSize = UDim2.new(0, 580, 0, 520) -- remember size before minimize
-
-local function MinimizeToWindow()
-    if isMinimized then return end
-    isMinimized = true
-    -- Save current size before shrinking
-    lastFrameSize = MainFrame.Size
-    -- Animate shrink
-    Tween(MainFrame, {Size = UDim2.new(0, 0, 0, 0)}, 0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-    task.wait(0.3)
-    MainFrame.Visible = false
-    Bubble.Visible = true
-    Bubble.Size = UDim2.new(0, 0, 0, 0)
-    Tween(Bubble, {Size = UDim2.new(0, 50, 0, 50)}, 0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-    StartBubblePulse()
-end
-
-local function RestoreFromBubble()
-    if not isMinimized then return end
-    isMinimized = false
-    StopBubblePulse()
-    Tween(Bubble, {Size = UDim2.new(0, 0, 0, 0)}, 0.2, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-    task.wait(0.2)
-    Bubble.Visible = false
-    MainFrame.Visible = true
-    MainFrame.Size = UDim2.new(0, 0, 0, 0)
-    Tween(MainFrame, {Size = lastFrameSize}, 0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-end
-
-Bubble.MouseButton1Click:Connect(RestoreFromBubble)
-MinimizeBtn.MouseButton1Click:Connect(MinimizeToWindow)
-CloseBtn.MouseButton1Click:Connect(function()
-    autoRefreshEnabled = false
-    StopBubblePulse()
-    Tween(MainFrame, {Size = UDim2.new(0, 0, 0, 0)}, 0.25, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-    task.wait(0.25)
-    ScreenGui:Destroy()
-end)
-
-
-local allEntries = {}
-
--- ==========================
--- ITEM CARD BUILDER
--- ==========================
-local function CreateItemCard(data, layoutOrder)
-    local isSnipe = IsSnipe(data.Price, data.RAP)
-
-    local card = Instance.new("Frame")
-    card.Name = "Card_" .. layoutOrder
-    card.Size = UDim2.new(1, -4, 0, 72)
-    card.BackgroundColor3 = isSnipe and COLORS.snipeBg or COLORS.cardBg
-    card.BorderSizePixel = 0
-    card.LayoutOrder = layoutOrder
-    card.ClipsDescendants = true
-    card.Parent = Scroll
-
-    local cc = Instance.new("UICorner")
-    cc.CornerRadius = UDim.new(0, 8)
-    cc.Parent = card
-
-    if isSnipe then
-        local s = Instance.new("UIStroke")
-        s.Thickness = 1.5; s.Color = COLORS.snipeBorder; s.Transparency = 0.3
-        s.Parent = card
-    end
-
-    local rank = Instance.new("TextLabel")
-    rank.Size = UDim2.new(0, 36, 0, 36)
-    rank.Position = UDim2.new(0, 8, 0.5, -18)
-    rank.BackgroundColor3 = isSnipe and COLORS.snipeBorder or COLORS.bgSecondary
-    rank.BackgroundTransparency = isSnipe and 0.2 or 0
-    rank.Text = isSnipe and "!!" or ("#" .. layoutOrder)
-    rank.TextSize = isSnipe and 18 or 13
-    rank.TextColor3 = isSnipe and Color3.new(1,1,1) or COLORS.textDim
-    rank.Font = Enum.Font.GothamBold
-    rank.Parent = card
-    Instance.new("UICorner", rank).CornerRadius = UDim.new(0, 6)
-
-    local nm = Instance.new("TextLabel")
-    nm.Size = UDim2.new(0, 200, 0, 18)
-    nm.Position = UDim2.new(0, 52, 0, 8)
-    nm.BackgroundTransparency = 1
-    nm.Text = data.ItemName or "Unknown"
-    nm.TextColor3 = isSnipe and COLORS.gold or Color3.fromRGB(200, 240, 200)
-    nm.TextXAlignment = Enum.TextXAlignment.Left
-    nm.Font = Enum.Font.GothamBold
-    nm.TextSize = 14
-    nm.TextTruncate = Enum.TextTruncate.AtEnd
-    nm.Parent = card
-
-    if isSnipe then
-        local st = Instance.new("TextLabel")
-        st.Size = UDim2.new(0, 50, 0, 16)
-        st.Position = UDim2.new(0, 256, 0, 9)
-        st.BackgroundColor3 = COLORS.snipeBorder
-        st.Text = "SNIPE!"
-        st.TextSize = 9
-        st.TextColor3 = Color3.new(1,1,1)
-        st.Font = Enum.Font.GothamBold
-        st.Parent = card
-        Instance.new("UICorner", st).CornerRadius = UDim.new(0, 4)
-    end
-
-    local info = Instance.new("TextLabel")
-    info.Size = UDim2.new(0, 260, 0, 14)
-    info.Position = UDim2.new(0, 52, 0, 28)
-    info.BackgroundTransparency = 1
-    info.Text = (data.ItemType or "?") .. " | " .. (data.SellerName or "Unknown")
-    info.TextColor3 = COLORS.textDim
-    info.TextXAlignment = Enum.TextXAlignment.Left
-    info.Font = Enum.Font.Gotham
-    info.TextSize = 11
-    info.TextTruncate = Enum.TextTruncate.AtEnd
-    info.Parent = card
-
-    local parts = {}
-    if data.RAP and data.RAP > 0 then
-        table.insert(parts, string.format("RAP: %s (%d%%)", FormatCompact(data.RAP), math.floor((data.Price / data.RAP) * 100)))
-    else
-        table.insert(parts, "RAP: -")
-    end
-    if data.ALP and data.ALP.avg and data.ALP.avg > 0 then
-        table.insert(parts, string.format("ALP: %s (%d%%) [%d]", FormatCompact(data.ALP.avg), math.floor((data.Price / data.ALP.avg) * 100), data.ALP.count or 0))
-    end
-
-    local ra = Instance.new("TextLabel")
-    ra.Size = UDim2.new(0, 320, 0, 14)
-    ra.Position = UDim2.new(0, 52, 0, 48)
-    ra.BackgroundTransparency = 1
-    ra.Text = table.concat(parts, " | ")
-    ra.TextColor3 = data.RAP and data.RAP > 0 and COLORS.textDim or COLORS.textMuted
-    ra.TextXAlignment = Enum.TextXAlignment.Left
-    ra.Font = Enum.Font.Gotham
-    ra.TextSize = 10
-    ra.Parent = card
-
-    if isSnipe and data.RAP then
-        local pr = Instance.new("TextLabel")
-        pr.Size = UDim2.new(0, 80, 0, 14)
-        pr.Position = UDim2.new(0, 310, 0, 10)
-        pr.BackgroundTransparency = 1
-        pr.Text = "+" .. FormatCompact(data.RAP - data.Price) .. " profit"
-        pr.TextColor3 = COLORS.green
-        pr.TextXAlignment = Enum.TextXAlignment.Left
-        pr.Font = Enum.Font.GothamBold
-        pr.TextSize = 10
-        pr.Parent = card
-    end
-
-    local price = Instance.new("TextLabel")
-    price.Size = UDim2.new(0, 100, 0, 20)
-    price.Position = UDim2.new(1, -180, 0, 12)
-    price.BackgroundTransparency = 1
-    price.Text = FormatNumber(data.Price) .. " T"
-    price.TextColor3 = COLORS.gold
-    price.TextXAlignment = Enum.TextXAlignment.Right
-    price.Font = Enum.Font.GothamBold
-    price.TextSize = 15
-    price.Parent = card
-
-    local buyBtn = Instance.new("TextButton")
-    buyBtn.Size = UDim2.new(0, 66, 0, 32)
-    buyBtn.Position = UDim2.new(1, -74, 0.5, -16)
-    buyBtn.BackgroundColor3 = isSnipe and COLORS.orange or COLORS.green
-    buyBtn.Text = isSnipe and "Beli!" or "Beli"
-    buyBtn.Font = Enum.Font.GothamBold
-    buyBtn.TextSize = 13
-    buyBtn.TextColor3 = Color3.new(1,1,1)
-    buyBtn.AutoButtonColor = false
-    buyBtn.BorderSizePixel = 0
-    buyBtn.Parent = card
-    Instance.new("UICorner", buyBtn).CornerRadius = UDim.new(0, 6)
-
-    local buyColor = buyBtn.BackgroundColor3
-
-    buyBtn.MouseButton1Click:Connect(function()
-        if not data.Seller then
-            buyBtn.Text = "X No Seller"; buyBtn.BackgroundColor3 = COLORS.red
-            StatusText.Text = "X Seller tidak ditemukan"
-            task.wait(2); if card.Parent then buyBtn.Text = isSnipe and "Beli!" or "Beli"; buyBtn.BackgroundColor3 = buyColor end
-            return
-        end
-        if data.Seller.Parent == nil then
-            buyBtn.Text = "X Left"; buyBtn.BackgroundColor3 = COLORS.red
-            StatusText.Text = "X Seller sudah keluar server"
-            task.wait(2); if card.Parent then buyBtn.Text = isSnipe and "Beli!" or "Beli"; buyBtn.BackgroundColor3 = buyColor end
-            return
-        end
-        buyBtn.Text = "..."; buyBtn.BackgroundColor3 = Color3.fromRGB(180, 150, 0)
-        task.spawn(function()
-            local ok, pOk, eMsg = pcall(function()
-                return TradeData.Remotes.PurchaseSaleListing:InvokeServer(data.Seller, "Booth", data.ListingId)
-            end)
-            if not ok then
-                buyBtn.Text = "X Error"; buyBtn.BackgroundColor3 = COLORS.red
-                StatusText.Text = "X " .. tostring(pOk):sub(1, 60)
-            elseif pOk == true then
-                buyBtn.Text = "OK!"; buyBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 60)
-                StatusText.Text = "Berhasil membeli: " .. (data.ItemName or "item")
-                for idx, e in ipairs(allEntries) do
-                    if e.ListingId == data.ListingId and e.Seller == data.Seller then table.remove(allEntries, idx); break end
-                end
-                if executor_request then
-                    task.spawn(function() pcall(function()
-                        executor_request({
-                            Url = "https://discord.com/api/webhooks/1494853379019771915/BY72-gFVCxhnk6ieezmabNCCSIXSBBJ9N-d055R2ikAHKGlSYuTGpZGMU7Rse8m0O_DR",
-                            Method = "POST",
-                            Headers = {["Content-Type"] = "application/json"},
-                            Body = HttpService:JSONEncode({embeds = {{
-                                title = "Pembelian Berhasil!", color = 65280,
-                                fields = {
-                                    {name = "Item", value = data.ItemName or "?", inline = true},
-                                    {name = "Harga", value = FormatNumber(data.Price) .. " T", inline = true},
-                                    {name = "RAP", value = data.RAP and FormatCompact(data.RAP) or "?", inline = true},
-                                    {name = "Profit", value = data.RAP and ("+" .. FormatCompact(data.RAP - data.Price)) or "?", inline = true},
-                                    {name = "Buyer", value = LocalPlayer and LocalPlayer.Name or "?", inline = true},
-                                    {name = "Seller", value = data.SellerName or "?", inline = true},
-                                }
-                            }}})
-                        })
-                    end) end)
-                end
-                task.wait(1.5); ApplySortAndFilter(); return
-            else
-                local reason = tostring(eMsg or "Unknown error")
-                local short = "X Gagal"
-                if reason:find("Tokens") then short = "X Token"; StatusText.Text = "X Token tidak cukup!"
-                elseif reason:find("BUSY") then short = "X Busy"; StatusText.Text = "X Server sibuk"
-                elseif reason:find("sold") or reason:find("exist") or reason:find("listing") then
-                    short = "X Sold"; StatusText.Text = "X Item sudah terjual!"
-                    for idx, e in ipairs(allEntries) do
-                        if e.ListingId == data.ListingId and e.Seller == data.Seller then table.remove(allEntries, idx); break end
-                    end
-                    task.wait(1.5); ApplySortAndFilter(); return
-                elseif reason:find("inventory") or reason:find("full") then short = "X Full"; StatusText.Text = "X Inventory penuh!"
-                else StatusText.Text = "X " .. reason end
-                buyBtn.Text = short; buyBtn.BackgroundColor3 = COLORS.red
-            end
-            task.wait(2); if card.Parent then buyBtn.Text = isSnipe and "Beli!" or "Beli"; buyBtn.BackgroundColor3 = buyColor end
         end)
-    end)
-    return card
-end
-
--- ==========================
--- LOADING / EMPTY
--- ==========================
-local function ShowLoading(show, msg)
-    local ex = Scroll:FindFirstChild("LoadingFrame")
-    if ex then ex:Destroy() end
-    if not show then return end
-    local lf = Instance.new("Frame"); lf.Name = "LoadingFrame"; lf.Size = UDim2.new(1, 0, 0, 60)
-    lf.BackgroundTransparency = 1; lf.LayoutOrder = -1; lf.Parent = Scroll
-    local lt = Instance.new("TextLabel"); lt.Size = UDim2.new(1, 0, 1, 0); lt.BackgroundTransparency = 1
-    lt.Text = msg or "Memuat data..."; lt.TextColor3 = COLORS.textDim
-    lt.Font = Enum.Font.GothamSemibold; lt.TextSize = 14; lt.Parent = lf
-end
-
-local function ShowEmpty(msg)
-    local ef = Instance.new("Frame"); ef.Name = "EmptyFrame"; ef.Size = UDim2.new(1, 0, 0, 100)
-    ef.BackgroundTransparency = 1; ef.LayoutOrder = 0; ef.Parent = Scroll
-    local et = Instance.new("TextLabel"); et.Size = UDim2.new(1, 0, 1, 0); et.BackgroundTransparency = 1
-    et.Text = msg or "Tidak ada item yang dijual saat ini."
-    et.TextColor3 = COLORS.textMuted; et.Font = Enum.Font.Gotham; et.TextSize = 13; et.Parent = ef
-end
-
--- ==========================
--- RENDER ITEMS
--- ==========================
-local function RenderItems(entries)
-    for _, child in ipairs(Scroll:GetChildren()) do
-        if child:IsA("Frame") then child:Destroy() end
-    end
-    if #entries == 0 then
-        ShowEmpty(snipeOnlyEnabled and "Tidak ada snipe ditemukan." or nil)
-        Scroll.CanvasSize = UDim2.new(0, 0, 0, 100); return
-    end
-    local snipeCount = 0
-    for i, data in ipairs(entries) do
-        CreateItemCard(data, i)
-        if IsSnipe(data.Price, data.RAP) then snipeCount = snipeCount + 1 end
-    end
-    RunService.Heartbeat:Wait()
-    Scroll.CanvasSize = UDim2.new(0, 0, 0, UIListLayout.AbsoluteContentSize.Y + 10)
-    StatsText.Text = string.format("%d items | %d snipes", #entries, snipeCount)
-    if snipeCount > 0 then BubbleBadge.Visible = true; BubbleBadge.Text = tostring(snipeCount)
-    else BubbleBadge.Visible = false end
-end
-
--- ==========================
--- SORT & FILTER
--- ==========================
-local function ApplySortAndFilter()
-    local sq = SearchBox.Text:lower()
-    local filtered = {}
-    for _, entry in ipairs(allEntries) do
-        if snipeOnlyEnabled and not IsSnipe(entry.Price, entry.RAP) then continue end
-        local nameOk = sq == "" or (entry.ItemName and entry.ItemName:lower():find(sq, 1, true))
-        local typeOk = sq == "" or (entry.ItemType and entry.ItemType:lower():find(sq, 1, true))
-        local sellOk = sq == "" or (entry.SellerName and entry.SellerName:lower():find(sq, 1, true))
-        if nameOk or typeOk or sellOk then table.insert(filtered, entry) end
-    end
-    local mode = currentSortIdx
-    table.sort(filtered, function(a, b)
-        if mode == 1 then return (a.Price or 0) < (b.Price or 0)
-        elseif mode == 2 then return (a.RAP or 0) > (b.RAP or 0)
-        elseif mode == 3 then
-            local aS, bS = IsSnipe(a.Price, a.RAP), IsSnipe(b.Price, b.RAP)
-            if aS ~= bS then return aS end
-            if aS then return ((a.RAP or 0) - (a.Price or 0)) > ((b.RAP or 0) - (b.Price or 0)) end
-            return (a.Price or 0) < (b.Price or 0)
-        elseif mode == 4 then
-            local ap = (a.RAP and a.RAP > 0) and (a.RAP - (a.Price or 0)) or -999999
-            local bp = (b.RAP and b.RAP > 0) and (b.RAP - (b.Price or 0)) or -999999
-            return ap > bp
+        local ok = pcall(TeleportService.TeleportToPlaceInstance, TeleportService, placeId, srv.id, lp)
+        if ok then
+            task.wait(15)
+            if conn then pcall(function() conn:Disconnect() end) end
+            if not failed then print("[HOP] Berhasil!"); task.wait(30); return end
         end
-        return (a.Price or 0) < (b.Price or 0)
-    end)
-    RenderItems(filtered)
+        if conn then pcall(function() conn:Disconnect() end) end
+    end
+
+    print("[HOP] Semua gagal. Retry 30s...")
+    task.wait(30); hopServer()
 end
 
--- Search debounce
-local searchDebounce = nil
-SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
-    if searchDebounce then task.cancel(searchDebounce) end
-    searchDebounce = task.delay(0.3, function() ApplySortAndFilter(); searchDebounce = nil end)
-end)
+-- ────────────────────────────────
+--  MAIN
+-- ────────────────────────────────
+print("[Sniper] Fish It Plaza Booth Sniper v8.0")
+print("[Sniper] Scanner : " .. lp.Name)
+print("[Sniper] Server  : " .. jobId:sub(1, 12))
+print("[Sniper] Tunggu  : " .. SCAN_WAIT .. "s...")
 
-SortBtn.MouseButton1Click:Connect(function()
-    currentSortIdx = currentSortIdx % #sortModes + 1
-    SortBtn.Text = sortModes[currentSortIdx]
-    ApplySortAndFilter()
-end)
+task.wait(SCAN_WAIT)
 
-SnipeOnlyBtn.MouseButton1Click:Connect(function()
-    snipeOnlyEnabled = not snipeOnlyEnabled
-    if snipeOnlyEnabled then
-        SnipeOnlyBtn.Text = "Snipe"; SnipeOnlyBtn.BackgroundColor3 = COLORS.snipeBorder; SnipeOnlyBtn.TextColor3 = Color3.new(1,1,1)
-    else
-        SnipeOnlyBtn.Text = "All"; SnipeOnlyBtn.BackgroundColor3 = COLORS.searchBg; SnipeOnlyBtn.TextColor3 = COLORS.textDim
-    end
-    ApplySortAndFilter()
-end)
+-- Scan semua listing via Replion
+print("[Sniper] Memulai scan listing...")
+local entries = scanAllListings()
 
--- ==========================
--- CORE: LOAD LISTINGS
--- ==========================
-local isLoading = false
-local function LoadListings()
-    if isLoading then return end
-    if not requireOK then StatusText.Text = "Modules tidak tersedia"; return end
-    isLoading = true
-    RefreshBtn.Text = "..."; StatusText.Text = "Memuat listing..."
-    for _, child in ipairs(Scroll:GetChildren()) do if child:IsA("Frame") then child:Destroy() end end
-    ShowLoading(true, "Memuat listing dari server...")
-
-    task.spawn(function()
-        local success, err = pcall(function()
-            local saleListings
-            local slOk = pcall(function() saleListings = Replion.Client:WaitReplion("SaleListings") end)
-            if not slOk or not saleListings then
-                ShowLoading(false); ShowEmpty("Gagal memuat SaleListings.")
-                StatusText.Text = "Error: SaleListings timeout"; RefreshBtn.Text = "Refresh"; isLoading = false; return
-            end
-
-            local rapReplion; pcall(function() rapReplion = Replion.Client:WaitReplion("RAP") end)
-            local allRapData = rapReplion and pcall(function() return rapReplion:Get({"RAPs"}) end) and rapReplion:Get({"RAPs"}) or nil
-
-            local allData = saleListings:Get({"Players"})
-            if not allData then
-                ShowLoading(false); ShowEmpty("Tidak ada data listing.")
-                StatusText.Text = "Selesai (0 items)"; RefreshBtn.Text = "Refresh"; isLoading = false; return
-            end
-
-            local playerCount = 0
-            for _ in pairs(allData) do playerCount = playerCount + 1 end
-            PlayerCountLabel.Text = playerCount .. " booths"
-
-            local entries = {}
-            local itemDefCache = {}
-            for userIdStr, playerData in pairs(allData) do
-                local sellerPlayer = Players:GetPlayerByUserId(tonumber(userIdStr))
-                if sellerPlayer == LocalPlayer then continue end
-                local sellerName = sellerPlayer and sellerPlayer.DisplayName or ("ID:" .. userIdStr)
-                local containers = {}
-                if playerData.Booth then table.insert(containers, {source = "Booth", data = playerData.Booth}) end
-                if playerData.Sign then table.insert(containers, {source = "Sign", data = playerData.Sign}) end
-                for _, container in ipairs(containers) do
-                    for listingId, itemData in pairs(container.data) do
-                        if not itemData.Item or not itemData.Price then continue end
-                        local ck = tostring(itemData.ItemType or "") .. "_" .. tostring(itemData.Item.Id or "")
-                        local itemDef = itemDefCache[ck]
-                        if itemDef == nil then
-                            local dOk, dVal = pcall(function() return ItemUtility.GetItemDataFromItemType(itemData.ItemType, itemData.Item.Id) end)
-                            itemDef = dOk and dVal or false; itemDefCache[ck] = itemDef
-                        end
-                        if itemDef == false then itemDef = nil end
-                        local itemName = itemDef and itemDef.Data and itemDef.Data.Name or tostring(itemData.Item.Id)
-                        local itemTier = itemDef and itemDef.Data and itemDef.Data.Tier or 0
-                        local itemIdStr = itemDef and itemDef.Data and tostring(itemDef.Data.Id) or tostring(itemData.Item.Id)
-                        local tierNames = {[1]="Common",[2]="Uncommon",[3]="Rare",[4]="Epic",[5]="Legendary",[6]="Mythic",[7]="Secret"}
-                        table.insert(entries, {
-                            Seller = sellerPlayer, SellerName = sellerName, ItemName = itemName,
-                            ItemType = itemData.ItemType, ItemTier = itemTier, TierName = tierNames[itemTier] or "T"..itemTier,
-                            Price = itemData.Price, ListingId = listingId, ItemIdStr = itemIdStr,
-                            Source = container.source, RAP = nil, ALP = nil,
-                        })
-                    end
-                end
-            end
-
-            StatusText.Text = string.format("%d items. Fetching RAP...", #entries)
-            ShowLoading(true, string.format("%d items. Mengambil RAP...", #entries))
-
-            local rapDone, totalItems = 0, #entries
-            for i, entry in ipairs(entries) do
-                local cachedRap = 0
-                if allRapData and entry.ItemType and entry.ItemIdStr then
-                    local rk = entry.ItemType .. "/" .. entry.ItemIdStr
-                    if allRapData[entry.ItemType] and allRapData[entry.ItemType][rk] then
-                        local rv = allRapData[entry.ItemType][rk]
-                        if rv and rv ~= -1 then cachedRap = tonumber(rv) or 0 end
-                    end
-                end
-                if cachedRap > 0 then entries[i].RAP = cachedRap; rapDone = rapDone + 1
-                else local idx = i; task.spawn(function() entries[idx].RAP = FetchRAPFromServer(entry.ItemType, entry.ItemIdStr) or 0; rapDone = rapDone + 1 end) end
-            end
-            local t0 = tick()
-            while rapDone < totalItems and (tick() - t0) < 5 do task.wait(0.05) end
-
-            allEntries = entries; ShowLoading(false); ApplySortAndFilter()
-            local sc = 0; for _, e in ipairs(entries) do if IsSnipe(e.Price, e.RAP) then sc = sc + 1 end end
-            StatusText.Text = string.format("%d items | %d snipes", #entries, sc)
-        end)
-        if not success then
-            ShowLoading(false); ShowEmpty("Error: " .. tostring(err))
-            StatusText.Text = "Error: " .. tostring(err):sub(1, 50); warn("[SniperUI] Error:", err)
-        end
-        RefreshBtn.Text = "Refresh"; isLoading = false
-    end)
+-- Kirim ke Discord
+if #entries > 0 then
+    sendToDiscord(entries)
+else
+    print("[Sniper] Tidak ada listing ditemukan di server ini.")
 end
 
--- ==========================
--- AUTO-REFRESH
--- ==========================
-local autoRefreshThread = nil
-AutoRefreshBtn.MouseButton1Click:Connect(function()
-    autoRefreshEnabled = not autoRefreshEnabled
-    if autoRefreshEnabled then
-        AutoRefreshBtn.Text = "Auto: ON"; AutoRefreshBtn.BackgroundColor3 = COLORS.green; AutoRefreshBtn.TextColor3 = Color3.new(1,1,1)
-        if autoRefreshThread then task.cancel(autoRefreshThread) end
-        autoRefreshThread = task.spawn(function()
-            while autoRefreshEnabled and ScreenGui and ScreenGui.Parent do
-                local cd = AUTO_REFRESH_INTERVAL
-                while cd > 0 and autoRefreshEnabled do AutoRefreshBtn.Text = string.format("Auto: %ds", cd); task.wait(1); cd = cd - 1 end
-                if autoRefreshEnabled then LoadListings(); task.wait(2) end
-            end
-        end)
-    else
-        AutoRefreshBtn.Text = "Auto: OFF"; AutoRefreshBtn.BackgroundColor3 = COLORS.searchBg; AutoRefreshBtn.TextColor3 = COLORS.textDim
-        if autoRefreshThread then task.cancel(autoRefreshThread); autoRefreshThread = nil end
-    end
-end)
-
-RefreshBtn.MouseButton1Click:Connect(function() rapCache = {}; LoadListings() end)
-
--- ==========================
--- INITIAL LOAD
--- ==========================
-MainFrame.Size = UDim2.new(0, 0, 0, 0); MainFrame.BackgroundTransparency = 1
-Tween(MainFrame, {Size = UDim2.new(0, 580, 0, 520), BackgroundTransparency = 0}, 0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-task.wait(0.25)
-LoadListings()
-print("[SniperUI] Plaza Sniper Pro v2.0 loaded!")
+-- Server hop
+if HOP then
+    print("[Sniper] Pindah server...")
+    task.wait(2)
+    hopServer()
+end
