@@ -21,7 +21,9 @@ local WEBHOOK    = "https://discord.com/api/webhooks/1511803435706617907/ISbwuFn
 local SCAN_WAIT  = 8     -- detik tunggu sebelum scan
 local HOP        = true  -- aktifkan auto server hop
 local HOP_DELAY  = 3
-local MIN_PLAYER = 5     -- min player per server saat hop
+local MIN_PLAYER  = 5     -- min player per server saat hop
+local SNIPE_ONLY  = true  -- hanya kirim listing yang harga < RAP
+local MIN_RAP     = 1     -- abaikan item dengan RAP 0 / tidak diketahui
 
 -- ────────────────────────────────
 --  HTTP
@@ -228,6 +230,27 @@ end
 --  KIRIM KE DISCORD
 -- ────────────────────────────────
 local function sendToDiscord(entries)
+    -- ── Filter: hanya listing dengan harga di bawah RAP ──
+    local filtered = {}
+    for _, e in ipairs(entries) do
+        if e.rap and e.rap >= MIN_RAP and e.price < e.rap then
+            table.insert(filtered, e)
+        end
+    end
+
+    print(("[Discord] %d listing total → %d di bawah RAP (snipe)"):format(#entries, #filtered))
+
+    if #filtered == 0 then
+        print("[Discord] Tidak ada listing di bawah RAP di server ini.")
+        return
+    end
+
+    -- Sort: profit terbesar dulu (RAP - harga)
+    table.sort(filtered, function(a, b)
+        return (a.rap - a.price) > (b.rap - b.price)
+    end)
+
+    entries = filtered
     if #entries == 0 then
         print("[Discord] Tidak ada listing untuk dikirim.")
         return
@@ -250,23 +273,23 @@ local function sendToDiscord(entries)
     local serverStr = jobId:sub(1, 8)
 
     local function buildField(i, e)
-        -- Persentase harga vs RAP
-        local rapStr = ""
-        if e.rap and e.rap > 0 then
-            local pct = math.floor((e.price / e.rap) * 100)
-            local isSnipe = pct <= 100
-            rapStr = ("\nRAP: **%s** (%d%%)%s"):format(
-                commas(e.rap), pct,
-                isSnipe and " 🔥SNIPE" or "")
-        end
+        local profit  = e.rap - e.price
+        local pct     = math.floor((e.price / e.rap) * 100)
         local weightStr = (e.weight and e.weight ~= "" and e.weight ~= "0")
             and (" | " .. e.weight .. "kg") or ""
         local sourceStr = e.source ~= "Booth" and (" [" .. e.source .. "]") or ""
 
         return {
-            name  = ("💎 #%d %s%s"):format(i, e.name, sourceStr),
-            value = ("💰 **%s Tokens**\n👤 %s\n🏷️ %s%s%s"):format(
-                commas(e.price), e.seller, e.tierName, weightStr, rapStr),
+            name  = ("🔥 #%d %s%s"):format(i, e.name, sourceStr),
+            value = (
+                "💰 Harga: **%s T** (%d%% RAP)\n" ..
+                "📊 RAP: **%s T** | Profit: **+%s T**\n" ..
+                "👤 %s | 🏷️ %s%s"
+            ):format(
+                commas(e.price), pct,
+                commas(e.rap), commas(profit),
+                e.seller, e.tierName, weightStr
+            ),
             inline = true,
         }
     end
