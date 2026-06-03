@@ -40,7 +40,7 @@ local CUSTOM_FILTERS = {
 local CATEGORY_FILTER = {
     Fish       = false,  -- ikan biasa
     Rod        = false,  -- pancing / rod
-    Skin       = false,  -- skin / cosmetic
+    Skin       = true,  -- skin / cosmetic
     Accessory  = false,  -- aksesoris
 }
 
